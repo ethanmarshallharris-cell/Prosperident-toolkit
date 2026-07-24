@@ -21,7 +21,14 @@ python3 -m pip install pyinstaller
 
 echo
 echo "Building OpenDentalSQLGenerator.app ..."
-python3 -m PyInstaller --windowed --name OpenDentalSQLGenerator --distpath dist --workpath build --specpath build --add-data "permtypes.json:." --add-data "permtype_details.json:." --add-data "prosperident_logo.png:." sql_generator_app.py
+# permtype_details.json only exists once a PermType refresh has been run at
+# least once here -- only bundle it if present, so a fresh checkout (which
+# won't have it yet) still builds successfully.
+EXTRA_DATA=()
+if [ -f "permtype_details.json" ]; then
+  EXTRA_DATA+=(--add-data "permtype_details.json:.")
+fi
+python3 -m PyInstaller --windowed --name OpenDentalSQLGenerator --distpath dist --workpath build --add-data "permtypes.json:." "${EXTRA_DATA[@]}" --add-data "prosperident_logo.png:." sql_generator_app.py
 
 echo
 echo "============================================================"

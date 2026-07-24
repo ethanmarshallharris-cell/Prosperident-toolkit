@@ -23,7 +23,12 @@ if errorlevel 1 goto :error
 
 echo.
 echo Building OpenDentalSQLGenerator.exe ...
-python -m PyInstaller --onefile --windowed --name OpenDentalSQLGenerator --distpath dist --workpath build --specpath build --add-data "permtypes.json;." --add-data "permtype_details.json;." --add-data "prosperident_logo.png;." sql_generator_app.py
+REM permtype_details.json only exists once a PermType refresh has been run
+REM at least once here -- only bundle it if present, so a fresh checkout
+REM (which won't have it yet) still builds successfully.
+set EXTRA_DATA=
+if exist permtype_details.json set EXTRA_DATA=--add-data "permtype_details.json;."
+python -m PyInstaller --onefile --windowed --name OpenDentalSQLGenerator --distpath dist --workpath build --add-data "permtypes.json;." %EXTRA_DATA% --add-data "prosperident_logo.png;." sql_generator_app.py
 if errorlevel 1 goto :error
 
 echo.

@@ -73,14 +73,23 @@ jobs:
       # --add-data needs ; on Windows and : on macOS/Linux, hence the two
       # branches. document_toolkit's logo lives in src/, odsql_tool's is
       # at its own root, next to sql_generator_app.py.
+      # permtype_details.json only exists once someone has run a PermType
+      # refresh at least once (see resource_paths.py / refresh_permtypes.py)
+      # -- it isn't committed to the repo from a fresh checkout, so
+      # --add-data must only reference it when it's actually present, or
+      # PyInstaller fails the whole build with "Unable to find ...".
       - name: Build with PyInstaller (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ matrix.tool_dir }}
         run: |
           if [ "${{ matrix.tool_dir }}" = "odsql_tool" ]; then
+            EXTRA_DATA=()
+            if [ -f "permtype_details.json" ]; then
+              EXTRA_DATA+=(--add-data "permtype_details.json;.")
+            fi
             python -m PyInstaller --onefile --windowed --name "${{ matrix.app_name }}" \
               --add-data "permtypes.json;." \
-              --add-data "permtype_details.json;." \
+              "${EXTRA_DATA[@]}" \
               --add-data "prosperident_logo.png;." \
               "${{ matrix.entry }}"
           else
@@ -94,9 +103,13 @@ jobs:
         working-directory: ${{ matrix.tool_dir }}
         run: |
           if [ "${{ matrix.tool_dir }}" = "odsql_tool" ]; then
+            EXTRA_DATA=()
+            if [ -f "permtype_details.json" ]; then
+              EXTRA_DATA+=(--add-data "permtype_details.json:.")
+            fi
             python -m PyInstaller --windowed --name "${{ matrix.app_name }}" \
               --add-data "permtypes.json:." \
-              --add-data "permtype_details.json:." \
+              "${EXTRA_DATA[@]}" \
               --add-data "prosperident_logo.png:." \
               "${{ matrix.entry }}"
           else

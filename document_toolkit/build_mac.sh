@@ -23,7 +23,7 @@ python3 -m pip install pyinstaller
 
 echo
 echo "Building DocumentToolkit.app ..."
-python3 -m PyInstaller --windowed --name DocumentToolkit --distpath dist --workpath build --specpath build --add-data "src/prosperident_logo.png:." src/main_gui.py
+python3 -m PyInstaller --windowed --name DocumentToolkit --distpath dist --workpath build --add-data "src/prosperident_logo.png:." src/main_gui.py
 
 echo
 echo "============================================================"

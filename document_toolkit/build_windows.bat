@@ -19,7 +19,7 @@ if errorlevel 1 goto :error
 
 echo.
 echo Building DocumentToolkit.exe ...
-python -m PyInstaller --onefile --windowed --name DocumentToolkit --distpath dist --workpath build --specpath build --add-data "src\prosperident_logo.png;." src\main_gui.py
+python -m PyInstaller --onefile --windowed --name DocumentToolkit --distpath dist --workpath build --add-data "src\prosperident_logo.png;." src\main_gui.py
 if errorlevel 1 goto :error
 
 echo.
