@@ -1,0 +1,8 @@
+.vs/
+bin/
+obj/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec

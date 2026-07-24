@@ -39,7 +39,7 @@ import urllib.request
 # (e.g. a OneDrive "anyone with the link -> direct download" link).
 # Until it's set, every check below fails harmlessly and silently, same
 # as being offline.
-VERSION_MANIFEST_URL = "https://REPLACE-WITH-VERSION-MANIFEST-URL/version.json"
+VERSION_MANIFEST_URL = "https://prosperident27-my.sharepoint.com/:u:/g/personal/ethan_marshallharris_prosperident_com/IQBSbzaRNlEDRYMwIzTqut5PAd0zry4cWn4uGrpgz4XNb_8?download=1"
 
 REQUEST_TIMEOUT_SECONDS = 4
 
