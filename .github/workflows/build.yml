@@ -1,0 +1,148 @@
+name: Build desktop apps
+
+# Builds a standalone Windows .exe and a standalone macOS .app (zipped)
+# for both tools, then attaches all four as downloadable files on a
+# GitHub Release. Runs automatically whenever a version tag is pushed
+# (see "Ongoing: shipping an update" in setting_up_auto_updates.md) --
+# that's the trigger to use when actually shipping a new build. It can
+# also be run by hand from the Actions tab (workflow_dispatch) any time,
+# e.g. to test that a change builds cleanly, without shipping anything.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tool_dir: document_toolkit
+            entry: src/main_gui.py
+            app_name: DocumentToolkit
+            requirements: requirements.txt
+            os: windows-latest
+            asset_name: DocumentToolkit-Windows.zip
+          - tool_dir: document_toolkit
+            entry: src/main_gui.py
+            app_name: DocumentToolkit
+            requirements: requirements.txt
+            os: macos-latest
+            asset_name: DocumentToolkit-macOS.zip
+          - tool_dir: odsql_tool
+            entry: sql_generator_app.py
+            app_name: OpenDentalSQLGenerator
+            requirements: ""
+            os: windows-latest
+            asset_name: OpenDentalSQLGenerator-Windows.zip
+          - tool_dir: odsql_tool
+            entry: sql_generator_app.py
+            app_name: OpenDentalSQLGenerator
+            requirements: ""
+            os: macos-latest
+            asset_name: OpenDentalSQLGenerator-macOS.zip
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -n "${{ matrix.requirements }}" ] && [ -f "${{ matrix.requirements }}" ]; then
+            pip install -r "${{ matrix.requirements }}"
+          fi
+          pip install pyinstaller
+
+      # odsql_tool ships permtypes.json / permtype_details.json bundled
+      # into the executable so a fresh install has a working default list
+      # immediately (see resource_paths.py). Both tools bundle
+      # prosperident_logo.png for the branded header (see branding.py).
+      # --add-data needs ; on Windows and : on macOS/Linux, hence the two
+      # branches. document_toolkit's logo lives in src/, odsql_tool's is
+      # at its own root, next to sql_generator_app.py.
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          if [ "${{ matrix.tool_dir }}" = "odsql_tool" ]; then
+            python -m PyInstaller --onefile --windowed --name "${{ matrix.app_name }}" \
+              --add-data "permtypes.json;." \
+              --add-data "permtype_details.json;." \
+              --add-data "prosperident_logo.png;." \
+              "${{ matrix.entry }}"
+          else
+            python -m PyInstaller --onefile --windowed --name "${{ matrix.app_name }}" \
+              --add-data "src/prosperident_logo.png;." \
+              "${{ matrix.entry }}"
+          fi
+
+      - name: Build with PyInstaller (macOS)
+        if: runner.os == 'macOS'
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          if [ "${{ matrix.tool_dir }}" = "odsql_tool" ]; then
+            python -m PyInstaller --windowed --name "${{ matrix.app_name }}" \
+              --add-data "permtypes.json:." \
+              --add-data "permtype_details.json:." \
+              --add-data "prosperident_logo.png:." \
+              "${{ matrix.entry }}"
+          else
+            python -m PyInstaller --windowed --name "${{ matrix.app_name }}" \
+              --add-data "src/prosperident_logo.png:." \
+              "${{ matrix.entry }}"
+          fi
+
+      - name: Package Windows build
+        if: runner.os == 'Windows'
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          cd dist
+          powershell -Command "Compress-Archive -Path '${{ matrix.app_name }}.exe' -DestinationPath '${{ matrix.asset_name }}'"
+          mv "${{ matrix.asset_name }}" "$GITHUB_WORKSPACE/${{ matrix.asset_name }}"
+
+      - name: Package macOS build
+        if: runner.os == 'macOS'
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "${{ matrix.app_name }}.app" "${{ matrix.asset_name }}"
+          mv "${{ matrix.asset_name }}" "$GITHUB_WORKSPACE/${{ matrix.asset_name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Publishes/updates the "latest" release with all four zips
+      # attached. This is what makes the hub page's four download
+      # buttons work as stable links (…/releases/latest/download/<asset>)
+      # that always resolve to whatever was built from the most recent
+      # version tag -- no need to edit links on every update.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          fail_on_unmatched_files: true
