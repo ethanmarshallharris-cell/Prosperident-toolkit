@@ -40,10 +40,8 @@ matches and 1 unmatched line (an "Audit #: 50" footer line), and
 verify_redaction() on the result should report ok=True.
 """
 import csv
-import json
 import os
 import re
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -105,35 +103,11 @@ PAREN_TOKEN_RE = re.compile(r"^\(?[0-9]*[A-Za-z][A-Za-z'\-./\\&_]*\)?,?$")
 # double-barreled last name has spaces around the hyphen, e.g.
 # "Marshall - Harris, Ethan" tokenizes as ["Marshall", "-", "Harris,", ...].
 HYPHEN_TOKENS = {"-", "‐", "‑", "‒", "–", "—"}
-# A middle initial -- a single letter, optionally followed by a period
-# and/or a comma, e.g. "B", "B.", "B,". Used by
-# _trim_to_plausible_name_words() as a structural continuation marker,
-# the same role HYPHEN_TOKENS and a parenthetical nickname play there:
-# unlike a real word (which could just as easily be the start of the
-# report's description column, e.g. "Payment"), a single bare letter is
-# essentially never how an English description word begins, so it's a
-# safe, distinct signal that this is "Last, First MI", not the start of
-# unrelated column content.
-MIDDLE_INITIAL_RE = re.compile(r"^[A-Za-z]\.?,?$")
 # A bare numeric token (e.g. a chart/ID number glued on as a separate word
 # rather than fused onto the name itself) is only plausible as the very
 # first word of a name -- allowing it anywhere else risks swallowing an
 # unrelated number from later in the line.
 LEADING_DIGITS_RE = re.compile(r"^[0-9]+$")
-# A dollar-amount-shaped token (the report's own "amount" column, e.g.
-# "-20.00", "1,234.56", "(50.00)", "$99.99") can never legitimately be part
-# of a person's name -- unlike a bare chart-number token, this doesn't need
-# a "first word only" carve-out, since a name is never followed by a
-# standalone dollar figure either. This exists because the gap-based
-# column-break detection just below (see _extract_position_words()) was
-# found, on a real report, to NOT reliably separate the name column from
-# the description/amount columns that follow it -- some report layouts
-# space every column boundary about as evenly as the words within a field,
-# so "this gap is much wider than a normal word gap" never fires, and the
-# sweep runs straight through into real transaction content. An amount
-# token is an unambiguous, layout-independent stop signal regardless of
-# whether the gap heuristic caught the boundary or not.
-AMOUNT_TOKEN_RE = re.compile(r"^\(?-?\$?[0-9][0-9,]*\.[0-9]{2}\)?$")
 
 Y_TOLERANCE = 2.0  # points; words within this vertical distance are treated as one line
 MIN_GAP_FOR_COLUMN_BREAK = 8.0  # points; absolute floor for "this is a new column"
@@ -232,96 +206,9 @@ def _is_name_token(tok: str, position: int) -> bool:
     return False
 
 
-def _trim_to_plausible_name_words(words):
-    """Trims a raw, gap-swept word list (see the loop in
-    _extract_position_words() just below) down to whatever plausibly
-    belongs to a name, using the report's OWN structural convention --
-    "Last, First", optionally continued by a spaced hyphen (a
-    double-barreled surname, e.g. "Marshall - Harris") or a parenthetical
-    nickname -- rather than trusting the gap-based loop to have found the
-    true column boundary on its own.
-
-    This exists because that gap-based detection was found, on a real
-    report, to not reliably separate the name column from the
-    description column that follows it: some report layouts space every
-    column boundary about as evenly as the words within a single field --
-    sometimes literally a single space everywhere, name-internal or
-    column-to-column alike -- so "this gap is much wider than a normal
-    word gap" never fires, and the sweep runs on into ordinary
-    description words. Those words pass _is_name_token()'s shape rules
-    just as easily as a real name does (a word made of plain letters is a
-    word made of plain letters, whether it's someone's surname or the
-    word "Payment"), so shape validation downstream in _find_name_span()
-    doesn't catch this either -- the whole swept span, name and
-    description and sometimes even the amount, would otherwise be
-    accepted as "the name" and redacted (or, from
-    find_unresolved_name_positions(), flagged for review) as one piece.
-
-    A name, though, reliably SIGNALS its own continuation: a trailing
-    comma inviting the next word ("Last," -> First), a bare hyphen
-    standing as its own word, a parenthetical nickname, or a middle
-    initial (a single letter, optionally with a trailing period/comma --
-    see MIDDLE_INITIAL_RE; "Smith, John B" is common enough in a
-    guarantor/patient name field that this needed its own carve-out,
-    same as the others). An ordinary word with NONE of those markers,
-    once the name already has its first two words in hand, is exactly
-    what an unrelated word from the next column looks like -- so it's
-    excluded here rather than assumed to be more of the name.
-
-    This ONLY EVER SHORTENS `words` (or returns it unchanged) -- it never
-    adds words the gap-based loop didn't already include -- so it can
-    never turn a name the gap logic already found correctly (2 or fewer
-    words, the overwhelmingly common case) into something narrower than
-    it should be, and it never causes a match that gap detection alone
-    already got right to be missed.
-    """
-    if len(words) <= 2:
-        return words
-    kept = words[:2]
-    idx = 2
-    while idx < len(words):
-        prev_tok = words[idx - 1][4]
-        cur_tok = words[idx][4]
-        prev_ends_comma = prev_tok.rstrip().endswith(",")
-        prev_is_hyphen = prev_tok in HYPHEN_TOKENS
-        # NOTE: deliberately NOT PAREN_TOKEN_RE here -- its "(" and ")"
-        # are themselves optional (so it also matches a plain word with
-        # no parenthesis at all, by design, for use inside
-        # _is_name_token()), which would make this check treat every
-        # ordinary word as a "marker" and defeat the whole trim. An
-        # actual parenthesis character is what signals a parenthetical
-        # nickname continuation here.
-        cur_is_marker = (
-            cur_tok in HYPHEN_TOKENS
-            or "(" in cur_tok
-            or ")" in cur_tok
-            or bool(MIDDLE_INITIAL_RE.match(cur_tok))
-        )
-        if prev_ends_comma or prev_is_hyphen or cur_is_marker:
-            kept.append(words[idx])
-            idx += 1
-            continue
-        break
-    return kept
-
-
-def _extract_position_words(line_words):
-    """Phase 1 of _find_name_span(): figures out which words occupy the
-    "name column" on a detail line -- purely by horizontal position (a
-    leading date token, then a run of words separated by less than this
-    line's column-break gap, additionally trimmed by
-    _trim_to_plausible_name_words() -- see that function for why) --
-    WITHOUT checking whether those words look like a person's name.
-    Returns (words, right_boundary) or None if this doesn't even look
-    like a detail line (no leading date token, or nothing follows it).
-
-    This is split out from _find_name_span() so the SAME positional logic
-    -- which column the report format guarantees the name sits in -- can
-    be reused by find_unresolved_name_positions() to check what's sitting
-    there AFTER redaction, regardless of whether it happens to be
-    name-shaped. _find_name_span() adds the shape validation on top of
-    this; find_unresolved_name_positions() deliberately doesn't, since its
-    whole point is to catch whatever the shape rules didn't anticipate.
+def _find_name_span(line_words):
+    """If this line looks like 'MM/DD/YYYY Last, First ...<column break>...',
+    return (name_text, rect, right_boundary_x). Otherwise return None.
     """
     if len(line_words) < 2:
         return None
@@ -336,12 +223,12 @@ def _extract_position_words(line_words):
     threshold = max(median_gap * GAP_MULTIPLIER, MIN_GAP_FOR_COLUMN_BREAK)
 
     idx = 1
-    words = []
+    name_words = []
     right_boundary = None
     while idx < len(line_words):
         tok = line_words[idx][4]
         gap_before = line_words[idx][0] - line_words[idx - 1][2]
-        if words and gap_before > threshold:
+        if name_words and gap_before > threshold:
             right_boundary = line_words[idx][0]
             break
         # A pure-digit word after we already have at least one name word
@@ -351,47 +238,17 @@ def _extract_position_words(line_words):
         # leading digit -- the very first word -- is handled separately
         # below, since that's the "chart number glued onto the front"
         # case and should stay part of the name.)
-        if words and LEADING_DIGITS_RE.match(tok):
+        if name_words and LEADING_DIGITS_RE.match(tok):
             right_boundary = line_words[idx][0]
             break
-        # A dollar-amount token can never be part of a name, regardless of
-        # how the gap-based check above scored the space before it -- see
-        # AMOUNT_TOKEN_RE's comment for why this is needed as its own,
-        # layout-independent stop condition.
-        if words and AMOUNT_TOKEN_RE.match(tok):
-            right_boundary = line_words[idx][0]
-            break
-        words.append(line_words[idx])
+        name_words.append(line_words[idx])
         idx += 1
     if right_boundary is None:
         # name ran to the end of the line with no further column after it
         right_boundary = line_words[-1][2] + 200  # generous room; caller clamps to page width
 
-    if not words:
+    if not name_words:
         return None
-
-    trimmed_words = _trim_to_plausible_name_words(words)
-    if len(trimmed_words) < len(words):
-        # The gap-based loop above swept in content past the name (see
-        # _trim_to_plausible_name_words()) -- pull the right boundary
-        # back to right where that excluded content starts, so the
-        # caller's redaction rectangle (_redact_rect_for_match()) can
-        # never reach into and erase that content too.
-        right_boundary = words[len(trimmed_words)][0]
-        words = trimmed_words
-
-    return words, right_boundary
-
-
-def _find_name_span(line_words):
-    """If this line looks like 'MM/DD/YYYY Last, First ...<column break>...',
-    return (name_text, rect, right_boundary_x). Otherwise return None.
-    """
-    extracted = _extract_position_words(line_words)
-    if extracted is None:
-        return None
-    name_words, right_boundary = extracted
-
     # A comma ("Last, First") is the normal, expected shape and the
     # strongest signal this is really a name -- but Dentrix data has also
     # been seen storing the name as "Last First" with no comma at all. Since
@@ -555,274 +412,6 @@ def scan_pdf(path: str):
     finally:
         doc.close()
     return matches, unmatched, page_count
-
-
-_POSITION_PLACEHOLDER_RE = re.compile(r"^<[^<>]+ \d+>$")  # same shape as _KEY_PLACEHOLDER_RE, defined below
-
-# --------------------------------------------------------------------
-# Manual override list for find_unresolved_name_positions(): report
-# vocabulary that structurally lands in the guaranteed "name position" on
-# some layouts (a payment-method column that starts close enough to the
-# name column that a report-specific quirk puts it there, a report
-# variant this module hasn't seen yet, etc.) but is never actually a
-# person's name -- "Credit Card" being the first confirmed real-world
-# case. No fixed word list can anticipate every practice-management
-# system's report vocabulary, so rather than keep chasing individual
-# values here one bug report at a time, this lets a reviewer permanently
-# silence a specific recurring false positive themselves, the moment they
-# see it, without needing a code change.
-#
-# Stored as a small JSON file NEXT TO THIS MODULE when running from
-# source (not a user-profile/app-data folder) so it's easy to find, back
-# up, or copy to a colleague's install, and survives an application
-# update that replaces this .py file -- see _overrides_path() for where
-# "next to this module" actually resolves to in the shipped .exe, which
-# is NOT the same folder a developer would find this .py file in.
-# Entries are matched by EXACT text (case-insensitively,
-# whitespace-collapsed) against what find_unresolved_name_positions()
-# would otherwise flag -- not a substring/prefix match -- so adding
-# "Credit Card" only silences that literal recurring value and can never
-# accidentally swallow a real name that merely contains those words.
-# --------------------------------------------------------------------
-_OVERRIDES_FILENAME = "dentrix_name_position_overrides.json"
-
-
-def _overrides_path() -> str:
-    """Where the override JSON file lives. Deliberately NOT simply "next
-    to this .py file" via __file__ -- that breaks under the app's real
-    deployed form.
-
-    DocumentToolkit.exe is built by PyInstaller in --onefile mode (see
-    DocumentToolkit.spec: a.binaries/a.datas go straight into EXE(...)
-    with no COLLECT step). A onefile build extracts every bundled module
-    -- including this one -- into a FRESH TEMPORARY DIRECTORY
-    (sys._MEIPASS) each time the .exe launches, and deletes that
-    directory again on exit. os.path.dirname(os.path.abspath(__file__))
-    inside a frozen build resolves to that throwaway extraction folder:
-    a file "saved" there vanishes the moment the app closes (so an
-    override a reviewer just added would never survive a restart), and a
-    file placed there ahead of time is never even seen in the first
-    place (nothing outside the bundled .py/.pyc files gets extracted
-    there at all). Confirmed the hard way: a manually pre-seeded
-    "Credit Card" override kept getting flagged anyway because the
-    running .exe was never looking at the same file this module's source
-    tree has.
-
-    sys.executable, by contrast, is the real, permanent path to
-    DocumentToolkit.exe wherever the user actually put it on disk -- so
-    when frozen (sys.frozen is set by PyInstaller), the override file
-    lives next to THAT instead, which is the closest persistent
-    equivalent "next to the module" has once there's no separate .py
-    file on disk to sit beside. Running from source (sys.frozen unset,
-    e.g. every test in this project) keeps the original, simpler
-    behavior of sitting next to this .py file.
-    """
-    if getattr(sys, "frozen", False):
-        base_dir = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, _OVERRIDES_FILENAME)
-
-
-def _normalize_override_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip()).lower()
-
-
-def load_name_position_overrides() -> set:
-    """Returns the set of normalized (lowercased, whitespace-collapsed)
-    values a reviewer has manually marked as "not a name" -- see
-    find_unresolved_name_positions()'s use of this. Returns an empty set
-    if the file doesn't exist yet or can't be read/parsed (a broken or
-    missing override file must never block the self-check itself -- it
-    just means nothing is overridden yet).
-    """
-    path = _overrides_path()
-    if not os.path.exists(path):
-        return set()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        return {_normalize_override_text(str(v)) for v in raw if str(v).strip()}
-    except Exception:  # noqa: BLE001
-        return set()
-
-
-def _load_raw_overrides_list() -> list:
-    path = _overrides_path()
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        return [str(v) for v in raw if str(v).strip()]
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def add_name_position_override(value: str) -> None:
-    """Permanently adds one more "this is not a name" exception (see
-    load_name_position_overrides()), persisted for every future run --
-    used by main_gui.py's leak-review screen when a reviewer checks "also
-    add this to the ignore list" on an occurrence. A no-op for
-    blank/whitespace-only input. Safe to call with a value already
-    present (case-insensitively) -- it won't be duplicated.
-    """
-    value = value.strip()
-    if not value:
-        return
-    existing_raw = _load_raw_overrides_list()
-    existing_normalized = {_normalize_override_text(v) for v in existing_raw}
-    if _normalize_override_text(value) not in existing_normalized:
-        existing_raw.append(value)
-        with open(_overrides_path(), "w", encoding="utf-8") as f:
-            json.dump(existing_raw, f, indent=2)
-
-
-def remove_name_position_override(value: str) -> None:
-    """Removes a previously-added override (case-insensitive, exact
-    match) -- e.g. if a reviewer added one by mistake. A no-op if it
-    isn't present.
-    """
-    norm = _normalize_override_text(value)
-    existing_raw = _load_raw_overrides_list()
-    kept = [v for v in existing_raw if _normalize_override_text(v) != norm]
-    if len(kept) != len(existing_raw):
-        with open(_overrides_path(), "w", encoding="utf-8") as f:
-            json.dump(kept, f, indent=2)
-
-
-# A real name -- even a hyphenated one with a parenthetical nickname, e.g.
-# "Marshall - Harris, Ethan (Marshall)" -- essentially never runs past this
-# many words. AMOUNT_TOKEN_RE's stop condition in _extract_position_words()
-# closes the most dangerous gap (a dollar figure ending up "in the name"),
-# but it does nothing about a report/description column's ORDINARY WORDS
-# (e.g. "Credit Card Payment - Thank You") getting swept in ahead of it --
-# those pass _is_name_token()'s own shape rules just fine on their own, so
-# shape-checking this candidate wouldn't catch it either. A word-count
-# ceiling this generous can't be crossed by any real name, so it's a safe,
-# layout-independent signal that the gap-based column-break detection
-# above didn't find the true boundary on THIS report's specific column
-# spacing and swept real, non-PHI report content in beside (or instead of)
-# the name. See the 'suspicious' field below for what this changes.
-MAX_PLAUSIBLE_NAME_WORDS = 5
-
-
-def find_unresolved_name_positions(output_path: str, ignore_values: set = None) -> list:
-    """Independent, STRUCTURAL safety net over an ALREADY-REDACTED file,
-    meant to be run alongside (and merged into) verify_redaction()'s
-    name-based leak check.
-
-    The report format guarantees that the "name column" on every detail
-    line (see _extract_position_words()) holds exactly one thing: the
-    patient/guarantor's name before redaction, or its <Patient N>
-    placeholder after a successful one. Nothing else is ever supposed to
-    be there. This re-scans the redacted output's own detail lines using
-    that SAME positional logic -- but, unlike scan_pdf(), without
-    requiring the text found there to look name-shaped -- and flags any
-    position that isn't the placeholder.
-
-    This matters because scan_pdf()'s _is_name_token() shape rules, no
-    matter how many real-world formatting quirks get added to them one at
-    a time (stray punctuation, unusual capitalization, and so on), can
-    never anticipate every way a name might be entered wrong in the
-    source system. A name garbled badly enough to fail every shape check
-    was never a candidate for redaction in the first place, so it's
-    invisible to both the "known name still present" leak check (it was
-    never in `matches` to look for) AND a purely shape-based scan of the
-    output. Checking the one thing the report format itself guarantees --
-    there is ALWAYS something in this exact position -- closes that gap:
-    whatever is sitting there that isn't the placeholder is worth a
-    human's attention, regardless of why the normal scan missed it.
-
-    Returns the same shape as verify_redaction()'s 'leaks' field --
-    [{'name': str, 'occurrences': [{'page_index': int, 'rect': [x0, y0,
-    x1, y1], 'context': str or None, 'suspicious': bool}, ...]}, ...], one
-    entry per distinct leftover text (occurrences of the exact same text
-    grouped together) -- so it can be merged directly into that field and
-    reuses the existing manual-review screen with no UI changes needed
-    beyond reading 'suspicious'. 'name' here just means "whatever text was
-    found in the name position", not necessarily a validated person's name
-    -- that's the point.
-
-    'suspicious' (see MAX_PLAUSIBLE_NAME_WORDS) is set when the text found
-    runs longer than any real name plausibly would -- the report format
-    only guarantees SOMETHING sits in this position, not that the gap-based
-    logic in _extract_position_words() correctly found where the name
-    itself ends and the next column begins on THIS report's specific
-    layout. A layout where every column boundary is spaced about as evenly
-    as the words within a field (seen in the wild) defeats that "gap much
-    wider than normal" heuristic entirely, and the sweep runs on into real
-    description/amount text instead of stopping at the name. Reporting the
-    occurrence either way is still correct -- there is genuinely something
-    other than a placeholder sitting in a position the format guarantees
-    should hold one -- but main_gui.py's review screen treats 'suspicious'
-    occurrences differently: it defaults them to Ignore instead of Redact
-    and warns the reviewer to check the text isn't more than just the
-    name, since blindly redacting an over-wide catch like this would
-    destroy real, non-PHI report content, not just fix a leak.
-
-    Unlike scan_pdf()'s 'unmatched' list (which reports the WHOLE line
-    text for anything under a header that didn't parse as a name), this
-    only reports the ISOLATED name-position text, and only when that
-    position is neither blank nor placeholder-shaped -- so an ordinary,
-    correctly-redacted line (position holds "<Patient 3>") produces
-    nothing, and this never floods the result with every successfully
-    redacted line in the file.
-
-    'ignore_values', if given, is a set of already-normalized (see
-    _normalize_override_text()) strings to silently skip -- text that a
-    reviewer has previously confirmed is report vocabulary, not a name
-    (e.g. "Credit Card", a payment-method value that can legitimately
-    land in the name position on some report layouts -- see
-    load_name_position_overrides()). Defaults to whatever's currently
-    persisted via load_name_position_overrides() so every caller gets
-    the manual-override list automatically without having to know it
-    exists; pass an explicit set (or set()) only to override that, e.g.
-    in tests that want to see what WOULD be flagged before any
-    overrides are applied.
-    """
-    if ignore_values is None:
-        ignore_values = load_name_position_overrides()
-    doc = fitz.open(output_path)
-    found = {}
-    try:
-        block_carried_over = False
-        for page_index in range(len(doc)):
-            page = doc[page_index]
-            lines = _group_words_into_lines(page)
-            current_header = None
-            in_block = block_carried_over
-            for line_words in lines:
-                text = _line_text(line_words)
-                if HEADER_RE.match(text):
-                    current_header = text
-                    in_block = True
-                    continue
-                if not in_block:
-                    continue
-                extracted = _extract_position_words(line_words)
-                if extracted is None:
-                    continue
-                words, _right_boundary = extracted
-                position_text = _line_text(words)
-                if _POSITION_PLACEHOLDER_RE.match(position_text):
-                    continue  # correctly redacted -- nothing to flag
-                if _normalize_override_text(position_text) in ignore_values:
-                    continue  # a reviewer already confirmed this exact text isn't a name
-                x0 = words[0][0]
-                y0 = min(w[1] for w in words)
-                x1 = words[-1][2]
-                y1 = max(w[3] for w in words)
-                found.setdefault(position_text, []).append({
-                    "page_index": page_index,
-                    "rect": [x0, y0, x1, y1],
-                    "context": current_header or CARRYOVER_HEADER_LABEL,
-                    "suspicious": len(words) > MAX_PLAUSIBLE_NAME_WORDS,
-                })
-            block_carried_over = in_block
-    finally:
-        doc.close()
-    return [{"name": text, "occurrences": occs} for text, occs in found.items()]
 
 
 def normalize_name(name: str) -> str:
@@ -1262,38 +851,24 @@ def verify_redaction(
          nearby line (a real failure mode seen during testing with PyMuPDF's
          redaction when a rectangle's Y-range brushes a neighboring line).
       4. Page count is unchanged.
-      5. The report's own guarantee about WHERE a name lives: every detail
-         line's name column (see find_unresolved_name_positions()) holds
-         either the placeholder or nothing else recognizable -- catches a
-         name garbled badly enough that it never matched scan_pdf()'s
-         name-shape rules in the first place, so it was never even a
-         candidate for redaction, and check #1 above never knew to look
-         for it (it only checks names ALREADY known from `matches`).
 
     Returns {'ok': bool, 'issues': list[str], 'leaks': list[dict],
     'structural_issue': str or None}. A non-ok result means the file
     should NOT be trusted/delivered as-is.
 
     'issues' is the original human-readable summary. 'leaks' is a
-    structured, per-occurrence breakdown of checks #1 and #5 (something
-    still visible where a name shouldn't be, or where one is missing) --
-    [{'name': str, 'occurrences': [{'page_index': int, 'rect': [x0, y0,
-    x1, y1], 'context': str or None}, ...]}, ...] -- used by main_gui.py's
-    manual-review screen (see apply_pdf_leak_decisions()) to actually
-    locate and, if the reviewer chooses, redact each occurrence, the same
-    way excel_spreadsheet.py's verify_column_redaction() 'leaks' field
-    drives its own review screen. A leak from check #5 has 'name' set to
-    whatever text was actually found there -- not necessarily a
-    recognized person's name shape, since that's exactly what check #5
-    exists to catch regardless of shape -- and apply_pdf_leak_decisions()
-    assigns it a brand-new placeholder number on a 'redact' decision,
-    since check #1's leaks always reuse an EXISTING number but a check #5
-    leak, by definition, never had one. 'structural_issue', when set,
-    flags a problem from checks #2-4 -- NOT a single leaked/unresolved
-    occurrence a per-occurrence decision can fix -- so main_gui.py only
-    offers manual review when 'leaks' is non-empty AND this is None;
-    otherwise it falls back to the original hard block (delete the
-    output, show an error, nothing saved).
+    structured, per-occurrence breakdown of check #1 only (a name still
+    present) -- [{'name': str, 'occurrences': [{'page_index': int,
+    'rect': [x0, y0, x1, y1], 'context': str or None}, ...]}, ...] -- used
+    by main_gui.py's manual-review screen (see apply_pdf_leak_decisions())
+    to actually locate and, if the reviewer chooses, redact each
+    occurrence, the same way excel_spreadsheet.py's verify_column_redaction()
+    'leaks' field drives its own review screen. 'structural_issue', when
+    set, flags a problem from checks #2-4 -- NOT a single leaked name a
+    per-occurrence decision can fix -- so main_gui.py only offers manual
+    review when 'leaks' is non-empty AND this is None; otherwise it falls
+    back to the original hard block (delete the output, show an error,
+    nothing saved).
 
     If given, `progress_callback(current_page_number, total_pages)` is
     invoked once per page (1-based) while re-extracting text for this
@@ -1445,39 +1020,6 @@ def verify_redaction(
     finally:
         doc_in.close()
         doc_out.close()
-
-    # Check #5 -- the structural, position-based safety net (see
-    # find_unresolved_name_positions()'s docstring): independent of
-    # everything above, since it never relies on `matches` at all. This
-    # is what catches a name garbled badly enough that scan_pdf() never
-    # recognized it as a name in the first place, so it was never a
-    # candidate for redaction and check #1 above has no way to know to
-    # look for it.
-    #
-    # Dedupe against check #1's own findings first: a name ALREADY
-    # flagged as a leak on a given page (same name, same page) would
-    # otherwise show up twice in 'leaks' -- once from the whole-document
-    # text search above, once from this position scan -- for what is
-    # really the same underlying occurrence.
-    already_flagged = {(leak["name"], occ["page_index"]) for leak in leaks for occ in leak["occurrences"]}
-    for position_leak in find_unresolved_name_positions(output_path):
-        name = position_leak["name"]
-        new_occurrences = [
-            occ for occ in position_leak["occurrences"] if (name, occ["page_index"]) not in already_flagged
-        ]
-        if not new_occurrences:
-            continue
-        existing_entry = next((leak for leak in leaks if leak["name"] == name), None)
-        if existing_entry is not None:
-            existing_entry["occurrences"].extend(new_occurrences)
-        else:
-            leaks.append({"name": name, "occurrences": new_occurrences})
-        issues.append(
-            f"Unredacted text found in the expected name position (not a recognized name "
-            f"shape, but the report format guarantees a name or placeholder belongs here): "
-            f"{name!r} ({len(new_occurrences)} occurrence(s))"
-        )
-
     return {
         "ok": len(issues) == 0,
         "issues": issues,
@@ -1486,17 +1028,12 @@ def verify_redaction(
     }
 
 
-def apply_pdf_leak_decisions(
-    output_path: str, decisions: List[dict], name_to_patient_no: dict
-) -> List[NameMatch]:
-    """Applies manual-review decisions for LEAKED/unresolved occurrences
-    (see verify_redaction()'s 'leaks' field, which now covers both a name
-    still visible somewhere AND unrecognized leftover text sitting in the
-    report's known name position -- see find_unresolved_name_positions())
-    directly to output_path, in place. main_gui.py's PDF leak review
-    screen builds `decisions` from that same 'leaks' field: [{'name':
-    str, 'page_index': int, 'rect': [x0, y0, x1, y1], 'action': 'redact'
-    or 'ignore'}, ...].
+def apply_pdf_leak_decisions(output_path: str, decisions: List[dict], name_to_patient_no: dict) -> int:
+    """Applies manual-review decisions for LEAKED occurrences (see
+    verify_redaction()'s 'leaks' field) directly to output_path, in
+    place. main_gui.py's PDF leak review screen builds `decisions` from
+    that same 'leaks' field: [{'name': str, 'page_index': int, 'rect':
+    [x0, y0, x1, y1], 'action': 'redact' or 'ignore'}, ...].
 
     A 'redact' decision is turned into one more NameMatch and run through
     apply_redactions() itself -- the exact same whole-page-rebuild pass
@@ -1511,52 +1048,33 @@ def apply_pdf_leak_decisions(
 
     `name_to_patient_no` is {raw_name: patient_no} for every name already
     assigned a number in this file (the same mapping assign_patient_numbers()
-    returned) -- a 'redact' decision reuses that name's EXISTING number if
-    it has one, so the newly-redacted occurrence gets the identical
-    <Patient N> label already used everywhere else in this file for that
-    same person. A name with NO existing number -- which only happens for
-    a check-#5 "unresolved name position" leak, since scan_pdf() never
-    recognized it as a name in the first place and so never assigned it
-    one -- gets the next number in sequence instead, exactly as if it had
-    been found during the original scan. This dict is MUTATED in place
-    with any such new assignment, so a caller that built it from its own
-    match list sees the new number too (e.g. to log it, or to build the
-    'placeholder' text for a review log entry) without needing a second
-    return value for it. Every occurrence of the SAME exact leftover text
-    reviewed together gets the SAME new number, whichever occurrence is
-    processed first.
+    returned) -- a 'redact' decision reuses that name's EXISTING number, so
+    the newly-redacted occurrence gets the identical <Patient N> label
+    already used everywhere else in this file for that same person. Every
+    leaked name in 'leaks' came from this file's own `matches` in the
+    first place, so a lookup miss here shouldn't normally happen; if it
+    somehow does, that one decision is skipped rather than guessing a
+    number, so a name is never redacted under the wrong patient's label.
 
-    An 'ignore' decision touches nothing -- the real name (or unresolved
-    text) stays visible at that exact location, the same "leave it, but
-    the reviewer explicitly chose to" principle as excel_spreadsheet.py's
-    apply_leak_decisions(). main_gui.py is responsible for logging that
-    choice durably (see write_manual_review_log()), same as the
-    spreadsheet side.
+    An 'ignore' decision touches nothing -- the real name stays visible at
+    that exact location, the same "leave it, but the reviewer explicitly
+    chose to" principle as excel_spreadsheet.py's apply_leak_decisions().
+    main_gui.py is responsible for logging that choice durably (see
+    write_manual_review_log()), same as the spreadsheet side.
 
-    Returns the list of NameMatch objects actually redacted -- empty if
-    nothing was written to output_path at all (every decision was
-    'ignore'). apply_redactions() mutates each of these in place with the
-    original font/size/color it sampled before wiping that spot, the same
-    as any other match it processes -- so a caller that also maintains a
-    name key file should fold these into whatever match list it next
-    passes to write_key()/write_key_batch(), the same way it would any
-    other match, rather than treating them separately. Without that, a
-    newly-discovered name from a check-#5 leak would end up correctly
-    redacted in the PDF but ABSENT from the key file, making it
-    impossible to un-redact later.
+    Returns the number of occurrences actually redacted. 0 means nothing
+    was written to output_path at all (every decision was 'ignore', or
+    there were no 'redact' decisions with a resolvable patient number).
     """
     to_redact = [d for d in decisions if d.get("action") == "redact"]
     if not to_redact:
-        return []
+        return 0
 
-    next_no = (max(name_to_patient_no.values()) + 1) if name_to_patient_no else 1
     synthetic_matches = []
     for d in to_redact:
         patient_no = name_to_patient_no.get(d["name"])
         if patient_no is None:
-            patient_no = next_no
-            name_to_patient_no[d["name"]] = patient_no
-            next_no += 1
+            continue
         x0, y0, x1, y1 = d["rect"]
         rect = fitz.Rect(x0, y0, x1, y1)
         synthetic_matches.append(
@@ -1576,12 +1094,12 @@ def apply_pdf_leak_decisions(
             )
         )
     if not synthetic_matches:
-        return []
+        return 0
 
     tmp_path = output_path + ".leak_review_tmp"
     apply_redactions(output_path, tmp_path, synthetic_matches)
     os.replace(tmp_path, output_path)
-    return synthetic_matches
+    return len(synthetic_matches)
 
 
 def write_name_key(key_path: str, input_path: str, output_path: str, matches: List[NameMatch]) -> None:

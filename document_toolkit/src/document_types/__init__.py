@@ -9,9 +9,11 @@ DOCUMENT_TYPES. That's the only change main_gui.py needs -- it drives the
 dropdown and everything else entirely from this list.
 """
 from . import dentrix_audit_trail
+from . import excel_spreadsheet
 
 DOCUMENT_TYPES = [
     dentrix_audit_trail,
+    excel_spreadsheet,
 ]
 
 
