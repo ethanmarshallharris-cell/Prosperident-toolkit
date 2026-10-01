@@ -5,6 +5,7 @@ standalone Windows and macOS apps by GitHub Actions.
 
 - `document_toolkit/` — redact/un-redact identifying info in report PDFs
 - `odsql_tool/` — Open Dental Security Log SQL Generator
+- `onenote_page_export/` — export the open OneNote page and all of its subpages to one Word document (Windows PowerShell scripts; packaged, not compiled)
 
 ## One-time setup (Ethan)
 

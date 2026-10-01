@@ -140,8 +140,31 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
 
+  # OneNote Page Export is a set of Windows PowerShell scripts (OneNote's
+  # automation interface exists only on Windows), so it needs no compiling --
+  # it is just zipped into a folder named "OneNote Page Export".
+  package-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package OneNote Page Export
+        run: |
+          mkdir -p "stage/OneNote Page Export"
+          cp onenote_page_export/* "stage/OneNote Page Export/"
+          rm -f "stage/OneNote Page Export/"*.log "stage/OneNote Page Export/LastFolder.txt" "stage/OneNote Page Export/UpdateNoticeShown.txt"
+          cd stage
+          zip -r "$GITHUB_WORKSPACE/OneNotePageExport-Windows.zip" "OneNote Page Export"
+          unzip -l "$GITHUB_WORKSPACE/OneNotePageExport-Windows.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneNotePageExport-Windows.zip
+          path: OneNotePageExport-Windows.zip
+
   release:
-    needs: build
+    needs: [build, package-scripts]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

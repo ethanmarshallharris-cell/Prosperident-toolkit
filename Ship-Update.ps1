@@ -1,7 +1,7 @@
 # Ship-Update.ps1 -- one-click release for Prosperident's desktop tools.
 # Lives in the root of the Prosperident-toolkit folder (a full working copy
 # of the GitHub repository: document_toolkit\, odsql_tool\, version.json,
-# the build workflow). Double-click Ship-Update.bat after changing either tool.
+# the build workflow). Double-click Ship-Update.bat after changing any tool.
 #
 # What it does: brings the folder up to date with GitHub -> works out which
 # tool(s) changed since the last release -> sets their build date -> shows
@@ -13,12 +13,13 @@
 $ErrorActionPreference = 'Continue'
 $Root    = $PSScriptRoot
 $Repo    = 'ethanmarshallharris-cell/Prosperident-toolkit'
-$Assets  = @('DocumentRedactor-Windows.zip','DocumentRedactor-macOS.zip','DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip')
+$Assets  = @('DocumentRedactor-Windows.zip','DocumentRedactor-macOS.zip','DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip','OneNotePageExport-Windows.zip')
 $RawUrl  = "https://raw.githubusercontent.com/$Repo/main/version.json"
 $LogFile = Join-Path $Root 'ship_log.txt'
 $Tools = @(
   @{ Key='document_toolkit'; Name='Document Redactor';         Dir='document_toolkit'; VerFile='document_toolkit\src\main_gui.py';  Var='APP_BUILD' },
-  @{ Key='odsql_tool';       Name='OpenDental SQL Generator'; Dir='odsql_tool';       VerFile='odsql_tool\sql_generator_app.py'; Var='APP_VERSION' }
+  @{ Key='odsql_tool';       Name='OpenDental SQL Generator'; Dir='odsql_tool';       VerFile='odsql_tool\sql_generator_app.py'; Var='APP_VERSION' },
+  @{ Key='onenote_page_export'; Name='OneNote Page Export';    Dir='onenote_page_export'; VerFile='onenote_page_export\Export-OneNotePage.ps1'; Var='AppVersion' }
 )
 Remove-Item $LogFile -ErrorAction SilentlyContinue
 
