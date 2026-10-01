@@ -42,12 +42,12 @@ downloaded copies an update exists.
 import json
 import urllib.request
 
-# Shareable, direct-download link to version.json. This is the ONE
-# thing that needs to be filled in once the manifest has a real home
-# (e.g. a OneDrive "anyone with the link -> direct download" link).
-# Until it's set, every check below fails harmlessly and silently, same
-# as being offline.
-VERSION_MANIFEST_URL = "https://prosperident27-my.sharepoint.com/:u:/g/personal/ethan_marshallharris_prosperident_com/IQBSbzaRNlEDRYMwIzTqut5PAd0zry4cWn4uGrpgz4XNb_8?download=1"
+# Direct link to version.json in the PUBLIC GitHub repository (repo root,
+# main branch). Needs no sign-in, so every copy of every tool can read it.
+# Ship an update by editing version.json in the repo -- see
+# setting_up_auto_updates.md. (Previously a OneDrive/SharePoint link,
+# which returned 403 to the tools because they don't sign in.)
+VERSION_MANIFEST_URL = "https://raw.githubusercontent.com/ethanmarshallharris-cell/Prosperident-toolkit/main/version.json"
 
 REQUEST_TIMEOUT_SECONDS = 4
 

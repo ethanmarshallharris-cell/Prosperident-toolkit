@@ -1,8 +1,8 @@
 {
   "document_toolkit": {
-    "version": "2026-07-24",
+    "version": "2026-10-01",
     "download_url": "https://github.com/ethanmarshallharris-cell/Prosperident-toolkit/releases/latest",
-    "notes": ""
+    "notes": "Adds Excel workbook redaction and a Batch Redact tab."
   },
   "odsql_tool": {
     "version": "2026-07-24",

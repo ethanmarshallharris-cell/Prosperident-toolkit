@@ -6,7 +6,18 @@ exists. This is separate from — and in addition to — the SQL Generator's exi
 PermType auto-refresh, and separate from the GitHub Actions build pipeline (see the
 repo's `README.md` for that) — this piece is just the "is this the newest build" check.
 
-## One-time setup
+## Where the manifest lives (updated October 2026)
+
+Both tools now read `version.json` straight from the root of this public GitHub
+repository (main branch):
+`https://raw.githubusercontent.com/ethanmarshallharris-cell/Prosperident-toolkit/main/version.json`
+
+The earlier OneDrive/SharePoint link returned "403 Forbidden" to the tools, because
+they fetch it without signing in, so the update check never worked. Steps 2-4 below
+(the OneDrive copy and its share link) are no longer needed; they are kept only as a
+record of the original setup.
+
+## One-time setup (original)
 
 1. **Finish the GitHub setup first** (repo README, steps 1–5) so you have a real
    `<owner>/<repo>` to point everything at.
@@ -52,8 +63,11 @@ Every time you change either tool:
 
 1. Bump its version string — `APP_BUILD` in `document_toolkit/src/main_gui.py`, or
    `APP_VERSION` in `odsql_tool/sql_generator_app.py` — to today's date.
-2. Edit `version.json`'s matching entry (`version`, and `notes` with a one-line summary
-   of what changed) and re-upload it to OneDrive.
+2. Edit `version.json` in the repo root -- the matching entry's `version` (same date as
+   step 1) and `notes` (a one-line summary of what changed) -- and commit it. The tools
+   read it directly from GitHub; nothing goes to OneDrive. Push this commit only after
+   the tagged build in step 3 has published, so nobody is told about a version that
+   isn't downloadable yet.
 3. Tag and push (`git tag vX.Y.Z && git push origin main --tags`) — GitHub Actions
    builds and publishes the new Windows/Mac apps automatically; the hub page's download
    buttons keep working unchanged since they always point at "latest."
