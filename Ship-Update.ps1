@@ -56,8 +56,13 @@ if ($behind -gt 0) {
 }
 
 # 2. What changed since the last release
-$LastTag = (@(& git tag --sort=-v:refname) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Select-Object -First 1)
+# Compare against the last release that actually published (a tag whose
+# build failed has no release, so its changes still need shipping).
+$TopTag  = (@(& git tag --sort=-v:refname) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Select-Object -First 1)
+$LastTag = (((& gh release view --repo $Repo --json tagName) -join "`n") | ConvertFrom-Json).tagName
+if (-not $LastTag) { $LastTag = $TopTag }
 if (-not $LastTag) { Fail 'No previous version tag (vX.Y.Z) found.' }
+if ($TopTag -ne $LastTag) { Log "Tag $TopTag exists but never published a release; shipping everything since $LastTag." }
 & git add -A
 $changed = @(& git diff --cached --name-only $LastTag)
 if (-not $changed) { Log "Nothing has changed since $LastTag -- nothing to ship."; Done }
@@ -109,7 +114,7 @@ if ($pending -or $unpushed) {
 if (-not $Changed) { Log 'SUCCESS -- shared files pushed; no app changed, so no new release.'; Done }
 
 # 5. Tag -> build -> verify release
-$m = [regex]::Match($LastTag, '^v(\d+)\.(\d+)\.(\d+)$')
+$m = [regex]::Match($TopTag, '^v(\d+)\.(\d+)\.(\d+)$')
 $NewTag = "v{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, ([int]$m.Groups[3].Value + 1)
 Write-Host "`nTagging $NewTag builds Windows and Mac versions of both tools and publishes them on the Tool Suite downloads (about 2-15 minutes)."
 if (-not (Ask "Release $NewTag now? Type YES")) { Log 'Code is pushed, but no release was made. Run this again to release.'; Done }

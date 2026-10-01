@@ -159,7 +159,7 @@ jobs:
       # any saved link to DocumentToolkit-*.zip keeps working.
       - name: Keep old Document Toolkit download names working
         run: |
-          find artifacts -name 'DocumentRedactor-*.zip' | while read -r f; do
+          find artifacts -type f -name 'DocumentRedactor-*.zip' | while read -r f; do
             cp "$f" "$(dirname "$f")/$(basename "$f" | sed 's/DocumentRedactor/DocumentToolkit/')"
           done
           ls -R artifacts
