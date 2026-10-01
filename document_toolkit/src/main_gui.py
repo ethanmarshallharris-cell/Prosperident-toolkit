@@ -1,5 +1,5 @@
 """
-Prosperident Document Toolkit -- desktop GUI.
+Prosperident Document Redactor -- desktop GUI.
 
 A central app for redacting identifying information out of different kinds
 of report PDFs, and for reversing that redaction later given the name key
@@ -64,12 +64,12 @@ except ImportError:
 
 import fitz  # PyMuPDF
 
-APP_TITLE = "Prosperident Document Toolkit"
+APP_TITLE = "Prosperident Document Redactor"
 # Bumped whenever the build changes in a way that's worth being able to
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-01"
+APP_BUILD = "2026-10-01.1"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -124,7 +124,7 @@ def _default_normalize_identity(text):
 
 
 class _BatchFileFailure(Exception):
-    """Raised internally by DocumentToolkitApp._batch_redact_worker when
+    """Raised internally by DocumentRedactorApp._batch_redact_worker when
     one file in a Batch Redact run fails its self-check. Carries enough
     detail for the all-or-nothing cleanup and the error message shown to
     the user; never escapes the worker thread."""
@@ -150,7 +150,7 @@ class RunLogger:
     """
 
     def __init__(self, log_name, header_line):
-        self.log_path = os.path.join(tempfile.gettempdir(), f"DocumentToolkit_{log_name}_log.txt")
+        self.log_path = os.path.join(tempfile.gettempdir(), f"DocumentRedactor_{log_name}_log.txt")
         self.run_start = time.time()
         self._append(f"\n--- {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -- {header_line} ---")
 
@@ -188,7 +188,7 @@ def _candidate_log_paths(near_path, log_name, suffix):
         base = os.path.splitext(os.path.basename(near_path))[0]
         near_dir = os.path.dirname(near_path) or "."
         candidates.append(os.path.join(near_dir, f"{base}_{suffix}.txt"))
-    candidates.append(os.path.join(tempfile.gettempdir(), f"DocumentToolkit_{log_name}_{suffix}.txt"))
+    candidates.append(os.path.join(tempfile.gettempdir(), f"DocumentRedactor_{log_name}_{suffix}.txt"))
     return candidates
 
 
@@ -351,7 +351,7 @@ def write_pdf_manual_review_log(log_name, input_path, output_path, replaced, ign
 
 def write_batch_needs_review_log(output_dir, file_unmatched_pairs):
     """Writes one combined CSV listing every 'needs review' line found
-    across an entire Batch Redact run (see DocumentToolkitApp._batch_redact_worker)
+    across an entire Batch Redact run (see DocumentRedactorApp._batch_redact_worker)
     -- the batch-mode counterpart to the single-file Redact tab's "Needs
     review" panel, which isn't shown at all in batch mode (batch mode has
     no per-match curation UI -- see base.py's "BATCH REDACTION" section).
@@ -394,7 +394,7 @@ FAILURE_TROUBLESHOOTING = (
 )
 
 
-class DocumentToolkitApp(tk.Tk):
+class DocumentRedactorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_TITLE}  (build {APP_BUILD})")
@@ -404,7 +404,7 @@ class DocumentToolkitApp(tk.Tk):
         if branding is not None:
             branding.apply_theme(self)
             branding.add_header(
-                self, "Document Toolkit",
+                self, "Document Redactor",
                 "Redact & un-redact identifying information in report PDFs and Excel workbooks",
             )
 
@@ -1622,7 +1622,7 @@ class DocumentToolkitApp(tk.Tk):
                 f"\n\nThe redacted file above is complete and verified, but the name key "
                 f"file could not be saved:\n{key_error}"
             )
-        timing_log_path = os.path.join(tempfile.gettempdir(), "DocumentToolkit_redact_log.txt")
+        timing_log_path = os.path.join(tempfile.gettempdir(), "DocumentRedactor_redact_log.txt")
         if os.path.exists(timing_log_path):
             msg += (
                 f"\n\nA timing breakdown for this run was recorded to:\n{timing_log_path}\n"
@@ -1911,7 +1911,7 @@ class DocumentToolkitApp(tk.Tk):
                 f"\n\nThe redacted file above is complete and verified, but the redaction "
                 f"key file could not be saved:\n{key_error}"
             )
-        timing_log_path = os.path.join(tempfile.gettempdir(), "DocumentToolkit_redact_log.txt")
+        timing_log_path = os.path.join(tempfile.gettempdir(), "DocumentRedactor_redact_log.txt")
         if os.path.exists(timing_log_path):
             msg += (
                 f"\n\nA timing breakdown for this run was recorded to:\n{timing_log_path}\n"
@@ -4347,7 +4347,7 @@ class DocumentToolkitApp(tk.Tk):
 
 
 def main():
-    app = DocumentToolkitApp()
+    app = DocumentRedactorApp()
     app.mainloop()
 
 

@@ -22,16 +22,16 @@ jobs:
         include:
           - tool_dir: document_toolkit
             entry: src/main_gui.py
-            app_name: DocumentToolkit
+            app_name: DocumentRedactor
             requirements: requirements.txt
             os: windows-latest
-            asset_name: DocumentToolkit-Windows.zip
+            asset_name: DocumentRedactor-Windows.zip
           - tool_dir: document_toolkit
             entry: src/main_gui.py
-            app_name: DocumentToolkit
+            app_name: DocumentRedactor
             requirements: requirements.txt
             os: macos-latest
-            asset_name: DocumentToolkit-macOS.zip
+            asset_name: DocumentRedactor-macOS.zip
           - tool_dir: odsql_tool
             entry: sql_generator_app.py
             app_name: OpenDentalSQLGenerator
@@ -154,6 +154,16 @@ jobs:
       # buttons work as stable links (…/releases/latest/download/<asset>)
       # that always resolve to whatever was built from the most recent
       # version tag -- no need to edit links on every update.
+      # The Document Toolkit was renamed Document Redactor in October 2026.
+      # Also publish each Document Redactor zip under its old file name so
+      # any saved link to DocumentToolkit-*.zip keeps working.
+      - name: Keep old Document Toolkit download names working
+        run: |
+          find artifacts -name 'DocumentRedactor-*.zip' | while read -r f; do
+            cp "$f" "$(dirname "$f")/$(basename "$f" | sed 's/DocumentRedactor/DocumentToolkit/')"
+          done
+          ls -R artifacts
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:

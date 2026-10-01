@@ -13,11 +13,11 @@
 $ErrorActionPreference = 'Continue'
 $Root    = $PSScriptRoot
 $Repo    = 'ethanmarshallharris-cell/Prosperident-toolkit'
-$Assets  = @('DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip')
+$Assets  = @('DocumentRedactor-Windows.zip','DocumentRedactor-macOS.zip','DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip')
 $RawUrl  = "https://raw.githubusercontent.com/$Repo/main/version.json"
 $LogFile = Join-Path $Root 'ship_log.txt'
 $Tools = @(
-  @{ Key='document_toolkit'; Name='Document Toolkit';         Dir='document_toolkit'; VerFile='document_toolkit\src\main_gui.py';  Var='APP_BUILD' },
+  @{ Key='document_toolkit'; Name='Document Redactor';         Dir='document_toolkit'; VerFile='document_toolkit\src\main_gui.py';  Var='APP_BUILD' },
   @{ Key='odsql_tool';       Name='OpenDental SQL Generator'; Dir='odsql_tool';       VerFile='odsql_tool\sql_generator_app.py'; Var='APP_VERSION' }
 )
 Remove-Item $LogFile -ErrorAction SilentlyContinue

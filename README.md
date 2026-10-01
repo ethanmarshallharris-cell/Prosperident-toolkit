@@ -48,8 +48,8 @@ standalone Windows and macOS apps by GitHub Actions.
    ```
 
    The four asset names are always:
-   - `DocumentToolkit-Windows.zip`
-   - `DocumentToolkit-macOS.zip`
+   - `DocumentRedactor-Windows.zip`
+   - `DocumentRedactor-macOS.zip`
    - `OpenDentalSQLGenerator-Windows.zip`
    - `OpenDentalSQLGenerator-macOS.zip`
 

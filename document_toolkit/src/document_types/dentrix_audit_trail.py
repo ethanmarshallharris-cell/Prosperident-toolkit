@@ -592,8 +592,8 @@ def _overrides_path() -> str:
     to this .py file" via __file__ -- that breaks under the app's real
     deployed form.
 
-    DocumentToolkit.exe is built by PyInstaller in --onefile mode (see
-    DocumentToolkit.spec: a.binaries/a.datas go straight into EXE(...)
+    DocumentRedactor.exe is built by PyInstaller in --onefile mode (see
+    DocumentRedactor.spec: a.binaries/a.datas go straight into EXE(...)
     with no COLLECT step). A onefile build extracts every bundled module
     -- including this one -- into a FRESH TEMPORARY DIRECTORY
     (sys._MEIPASS) each time the .exe launches, and deletes that
@@ -609,7 +609,7 @@ def _overrides_path() -> str:
     tree has.
 
     sys.executable, by contrast, is the real, permanent path to
-    DocumentToolkit.exe wherever the user actually put it on disk -- so
+    DocumentRedactor.exe wherever the user actually put it on disk -- so
     when frozen (sys.frozen is set by PyInstaller), the override file
     lives next to THAT instead, which is the closest persistent
     equivalent "next to the module" has once there's no separate .py

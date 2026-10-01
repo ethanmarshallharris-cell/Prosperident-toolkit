@@ -1,4 +1,4 @@
-# Prosperident Document Toolkit
+# Prosperident Document Redactor
 
 A Windows desktop tool for redacting identifying information out of
 files -- report PDFs and Excel workbooks today -- and for reversing that
@@ -418,11 +418,11 @@ close, scroll past, or just find hard to read/copy from in the moment,
 this file is the place to go back to later, or to attach if you're
 reporting a problem back to us -- it has the full issues list in plain
 text, not just whatever fit on screen. (If that folder can't be written
-to for some reason, it falls back to `%TEMP%\DocumentToolkit_..._selfcheck_log.txt`
+to for some reason, it falls back to `%TEMP%\DocumentRedactor_..._selfcheck_log.txt`
 instead -- again, the dialog tells you which.)
 
 If a save or un-redact ever seems to be taking a very long time or not
-completing, check `%TEMP%\DocumentToolkit_redact_log.txt` (or
+completing, check `%TEMP%\DocumentRedactor_redact_log.txt` (or
 `..._unredact_log.txt`) -- both are written to live, one line per phase as
 it actually happens, so that file shows exactly how far it got even if the
 run hasn't finished. These two always live in the OS temp folder, since
@@ -445,7 +445,7 @@ already includes everything needed (tkinter).
 
 1. Copy this whole folder to the Windows PC.
 2. Double-click `build_windows.bat`.
-3. When it finishes, your program is `dist\DocumentToolkit.exe`.
+3. When it finishes, your program is `dist\DocumentRedactor.exe`.
 
 That one `.exe` file is everything staff need -- copy it wherever's
 convenient (desktop, shared drive, etc.). No installation, no Python
@@ -455,7 +455,7 @@ needed on the machine that runs it.
 
 **To redact a PDF (e.g. Dentrix Audit Trail Report):**
 
-1. Open `DocumentToolkit.exe`, and stay on the **Redact** tab.
+1. Open `DocumentRedactor.exe`, and stay on the **Redact** tab.
 2. Choose the **document type** from the dropdown.
 3. **Browse...** and select the source PDF.
 4. Click **Scan**. Every item it found is listed in "Detected items",
@@ -476,7 +476,7 @@ needed on the machine that runs it.
 
 **To redact an Excel workbook:**
 
-1. Open `DocumentToolkit.exe`, and stay on the **Redact** tab.
+1. Open `DocumentRedactor.exe`, and stay on the **Redact** tab.
 2. Choose **"Excel Spreadsheet (choose columns)"** from the dropdown.
 3. **Browse...** and select the source .xlsx workbook.
 4. Click **Load Columns**. Every column header found (across every sheet)
