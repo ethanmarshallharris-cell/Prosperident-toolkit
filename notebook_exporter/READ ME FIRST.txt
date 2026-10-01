@@ -1,0 +1,53 @@
+PROSPERIDENT NOTEBOOK TO WORD EXPORTER
+Internal use only.
+
+Exports a whole case notebook from OneNote (web) to one Word document:
+cover page, table of contents, every section and page in order, pictures,
+checkboxes and page numbers. File attachments are saved in a folder beside
+the document. Optionally also makes a PDF.
+
+YOU NEED
+  - Windows with Microsoft Word installed.
+  - Your Prosperident account, with access to the case's notebook.
+
+SETUP (once per computer)
+  1. If this came as a download or email attachment: right-click the .zip,
+     choose Properties, tick "Unblock", click OK. Then extract it to a folder
+     of your choice, e.g. Documents\Notebook Exporter.
+  2. Put the case list, casecapture-config.json, in that folder. It is not
+     part of the download because it names clients - ask David for it.
+  3. Double-click "Sign In For OneNote.bat". It shows a short code and a web
+     address. Open the address, enter the code, and sign in with YOUR OWN
+     Prosperident account. (The window mentions a "service account" - ignore
+     that; it refers to the office automation.)
+
+TO EXPORT A NOTEBOOK
+  1. Double-click "Export Case Notebook to Word.bat".
+  2. It lists the cases. Type the case name exactly as shown and press Enter.
+  3. Answer Y if you also want a PDF.
+  4. The document appears in Documents\Prosperident Notebook Exports\.
+     A large notebook can take several minutes.
+
+IMPORTANT
+  - The exported document contains client and patient information. File it
+    in the case document library. Do not email it or keep stray copies.
+  - It is a snapshot. The notebook remains the working record.
+  - Handwriting (ink), audio and video recordings cannot be exported - the
+    OneNote service does not provide them. A page OneNote cannot deliver
+    appears with a note in its place.
+  - The case list (casecapture-config.json) is a snapshot. When new cases
+    are opened, ask David for an updated copy of that one file.
+  - UPDATES: after an export the window says when a newer version is on
+    www.prosperident.com/tool-suite. Extract the new download over this
+    folder; your casecapture-config.json and sign-in are kept.
+  - Every run writes a log to the "logs" folder here. If something goes
+    wrong, send that log to David.
+
+FILES
+  Export Case Notebook to Word.bat   - run this to export
+  Sign In For OneNote.bat            - one-time sign-in
+  Export-NotebookToWord.ps1          - the exporter
+  Get-DelegatedToken.ps1             - OneNote sign-in / credential renewal
+  GraphRetry.ps1                     - retries when Microsoft is busy
+  _log.cmd                           - writes the logs
+  casecapture-config.json            - the case list (from David; not in the download)

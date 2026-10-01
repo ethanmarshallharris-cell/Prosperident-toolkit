@@ -140,28 +140,31 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
 
-  # OneNote Page Export is a set of Windows PowerShell scripts (OneNote's
-  # automation interface exists only on Windows), so it needs no compiling --
-  # it is just zipped into a folder named "OneNote Page Export".
+  # The Notebook to Word Exporter is a set of Windows PowerShell scripts, so
+  # it needs no compiling - it is zipped into a folder named "Prosperident
+  # Notebook to Word Exporter". The case list (casecapture-config.json) names
+  # clients and is NEVER included: it is handed out internally.
   package-scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Package OneNote Page Export
+      - name: Package Notebook to Word Exporter
         run: |
-          mkdir -p "stage/OneNote Page Export"
-          cp onenote_page_export/* "stage/OneNote Page Export/"
-          rm -f "stage/OneNote Page Export/"*.log "stage/OneNote Page Export/LastFolder.txt" "stage/OneNote Page Export/UpdateNoticeShown.txt"
+          D="stage/Prosperident Notebook to Word Exporter"
+          mkdir -p "$D"
+          cp notebook_exporter/* "$D/"
+          rm -rf "$D/casecapture-config.json" "$D/logs"
+          if ls "$D" | grep -qi casecapture; then echo "Case list must not be published"; exit 1; fi
           cd stage
-          zip -r "$GITHUB_WORKSPACE/OneNotePageExport-Windows.zip" "OneNote Page Export"
-          unzip -l "$GITHUB_WORKSPACE/OneNotePageExport-Windows.zip"
+          zip -r "$GITHUB_WORKSPACE/NotebookToWordExporter-Windows.zip" "Prosperident Notebook to Word Exporter"
+          unzip -l "$GITHUB_WORKSPACE/NotebookToWordExporter-Windows.zip"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: OneNotePageExport-Windows.zip
-          path: OneNotePageExport-Windows.zip
+          name: NotebookToWordExporter-Windows.zip
+          path: NotebookToWordExporter-Windows.zip
 
   release:
     needs: [build, package-scripts]

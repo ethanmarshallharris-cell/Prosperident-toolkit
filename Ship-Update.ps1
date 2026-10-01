@@ -13,13 +13,13 @@
 $ErrorActionPreference = 'Continue'
 $Root    = $PSScriptRoot
 $Repo    = 'ethanmarshallharris-cell/Prosperident-toolkit'
-$Assets  = @('DocumentRedactor-Windows.zip','DocumentRedactor-macOS.zip','DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip','OneNotePageExport-Windows.zip')
+$Assets  = @('DocumentRedactor-Windows.zip','DocumentRedactor-macOS.zip','DocumentToolkit-Windows.zip','DocumentToolkit-macOS.zip','OpenDentalSQLGenerator-Windows.zip','OpenDentalSQLGenerator-macOS.zip','NotebookToWordExporter-Windows.zip')
 $RawUrl  = "https://raw.githubusercontent.com/$Repo/main/version.json"
 $LogFile = Join-Path $Root 'ship_log.txt'
 $Tools = @(
   @{ Key='document_toolkit'; Name='Document Redactor';         Dir='document_toolkit'; VerFile='document_toolkit\src\main_gui.py';  Var='APP_BUILD' },
   @{ Key='odsql_tool';       Name='OpenDental SQL Generator'; Dir='odsql_tool';       VerFile='odsql_tool\sql_generator_app.py'; Var='APP_VERSION' },
-  @{ Key='onenote_page_export'; Name='OneNote Page Export';    Dir='onenote_page_export'; VerFile='onenote_page_export\Export-OneNotePage.ps1'; Var='AppVersion' }
+  @{ Key='notebook_exporter';   Name='Notebook to Word Exporter'; Dir='notebook_exporter'; VerFile='notebook_exporter\Export-NotebookToWord.ps1'; Var='AppVersion' }
 )
 Remove-Item $LogFile -ErrorAction SilentlyContinue
 

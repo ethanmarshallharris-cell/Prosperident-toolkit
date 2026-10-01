@@ -7,7 +7,10 @@ build/
 dist/
 *.spec
 *_log.txt
-# OneNote Page Export run-time files
+# Run-time files
 *.log
 LastFolder.txt
 UpdateNoticeShown.txt
+logs/
+# The exporter's case list names clients - never commit it (the repo is public)
+casecapture-config.json
