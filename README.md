@@ -70,6 +70,9 @@ standalone Windows and macOS apps by GitHub Actions.
 
 ## Shipping an update from here on
 
+**The easy way:** double-click `Ship-Update.bat` in this folder after changing either tool. It sets the build date, pushes the change, tags the next version, waits for the build, checks all four downloads and updates `version.json`. The manual steps below are what it automates.
+
+
 1. Make your code changes.
 2. Bump the version — `APP_BUILD` in `document_toolkit/src/main_gui.py`,
    or `APP_VERSION` in `odsql_tool/sql_generator_app.py`.
