@@ -69,7 +69,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-01.1"
+APP_BUILD = "2026-10-13"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -121,6 +121,30 @@ def _default_normalize_identity(text):
     person.
     """
     return re.sub(r"\s+", " ", str(text).strip()).lower()
+
+
+def _seed_linked_combination(doc_type, input_path, col, state, pool, normalize_fn):
+    """Cross-type identity linking for a COMBINED-columns entry (see
+    _CombinedColumnsSection) -- the counterpart of the single-column
+    seeding loops in _redact_worker_spreadsheet() and
+    _batch_redact_worker(). Every distinct combination in this file is
+    compared to the linked identity pool through
+    combined_identity_text() ("Smith, John" with the last-name column
+    first): an identity the pool already has keeps its number, a new one
+    gets the next number. Seeded into state[col["name"]] keyed by
+    encode_combined_value(), the shape apply_column_redaction() reads.
+    Sorted first, so numbering never depends on set iteration order (see
+    the matching comment in _redact_worker_spreadsheet())."""
+    shared_label = col["shared_identity_label"]
+    identity_text = doc_type.combined_identity_text
+    encode = doc_type.encode_combined_value
+    seed = state.setdefault(col["name"], {})
+    combos = doc_type.distinct_combined_values(input_path, col["combine"])
+    for values in sorted(combos, key=lambda v: (normalize_fn(identity_text(v)), v)):
+        norm_key = normalize_fn(identity_text(values))
+        if norm_key not in pool:
+            pool[norm_key] = len(pool) + 1
+        seed[encode(values)] = f"<{shared_label} {pool[norm_key]}>"
 
 
 class _BatchFileFailure(Exception):
@@ -392,6 +416,236 @@ FAILURE_TROUBLESHOOTING = (
     "PDF viewer, File Explorer preview pane, antivirus scan)\n"
     "  - Check that the drive isn't full"
 )
+
+
+class _CombinedColumnsSection:
+    """The "Combine columns into one placeholder" panel, shared by the
+    Redact tab and the Batch Redact tab so the two never drift apart.
+
+    Lets the user pick two or three columns (e.g. First Name + Last Name)
+    that together identify one person or thing; each distinct combination
+    is redacted as one placeholder, <Name 1>, <Name 2>, ..., written into
+    every one of those columns in that row. See excel_spreadsheet.py's
+    "COMBINED COLUMNS" docstring section for the redaction and key-file
+    details. A column used in a combination has its own checkbox in the
+    checklist disabled (it cannot be redacted twice).
+    """
+
+    _NONE = "(none)"
+
+    def __init__(self, app, parent, on_change=None):
+        self.app = app
+        self.on_change = on_change
+        self.frame = ttk.LabelFrame(parent, text="Combine columns into one placeholder")
+        top = ttk.Frame(self.frame)
+        top.pack(fill="x", padx=6, pady=(6, 2))
+        self.add_btn = ttk.Button(top, text="Combine Columns...", command=self._open_dialog, state="disabled")
+        self.add_btn.pack(side="left")
+        ttk.Label(
+            top,
+            text="  e.g. First Name + Last Name redacted together as <Name 1>, <Name 2>, ... -- one "
+                 "number per distinct combination, written into every combined column of that row.",
+            foreground="#888", wraplength=760, justify="left",
+        ).pack(side="left")
+        self.list_frame = ttk.Frame(self.frame)
+        self.list_frame.pack(fill="x", padx=6, pady=(0, 6))
+        self.groups = []          # [{"parts", "label", "link", "frame"}, ...]
+        self.columns = []
+        self.row_vars = {}
+        self.entity_labels = []
+
+    # -- state ----------------------------------------------------------
+    def reset(self, column_names, row_vars, entity_labels):
+        """Called whenever the column checklist is (re)built."""
+        self.clear()
+        self.columns = list(column_names)
+        self.row_vars = row_vars
+        self.entity_labels = list(entity_labels or [])
+        self.add_btn.configure(state="normal" if len(self.columns) >= 2 else "disabled")
+
+    def clear(self):
+        for g in self.groups:
+            try:
+                g["frame"].destroy()
+            except tk.TclError:
+                pass
+        self.groups = []
+        self.columns = []
+        self.row_vars = {}
+        self.add_btn.configure(state="disabled")
+        self._changed()
+
+    def used_columns(self):
+        return {p for g in self.groups for p in g["parts"]}
+
+    def selections(self):
+        """selected_columns entries for every combination (see
+        excel_spreadsheet.apply_column_redaction())."""
+        xs = document_types.excel_spreadsheet
+        return [
+            {
+                "name": xs.combined_column_name(g["parts"]),
+                "label": g["label"],
+                "combine": list(g["parts"]),
+                "shared_identity_label": g["link"],
+            }
+            for g in self.groups
+        ]
+
+    def _changed(self):
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _set_rows_enabled(self, parts, enabled):
+        for p in parts:
+            v = self.row_vars.get(p)
+            if not v:
+                continue
+            if not enabled:
+                v["selected"].set(False)
+            check = v.get("check")
+            if check is not None:
+                try:
+                    check.configure(state="normal" if enabled else "disabled")
+                except tk.TclError:
+                    pass
+
+    def _add_group(self, parts, label, link):
+        row = ttk.Frame(self.list_frame)
+        row.pack(fill="x", pady=2)
+        text = f"{' + '.join(parts)}   ->   <{label} 1>, <{label} 2>, ..."
+        if link:
+            text += f"   (same identity as {link})"
+        ttk.Label(row, text=text, anchor="w").pack(side="left", padx=(4, 10))
+        group = {"parts": list(parts), "label": label, "link": link, "frame": row}
+        ttk.Button(row, text="Remove", command=lambda g=group: self._remove_group(g)).pack(side="left")
+        self.groups.append(group)
+        self._set_rows_enabled(parts, False)
+        self._changed()
+
+    def _remove_group(self, group):
+        if group in self.groups:
+            self.groups.remove(group)
+        group["frame"].destroy()
+        self._set_rows_enabled(group["parts"], True)
+        self._changed()
+
+    # -- dialog ---------------------------------------------------------
+    def _open_dialog(self):
+        used = self.used_columns()
+        available = [c for c in self.columns if c not in used]
+        if len(available) < 2:
+            messagebox.showinfo(
+                APP_TITLE, "At least two columns that are not already combined are needed.", parent=self.app
+            )
+            return
+        NONE = self._NONE
+        dlg = tk.Toplevel(self.app)
+        dlg.title("Combine columns")
+        dlg.transient(self.app)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Pick the columns that together identify one person or thing. Every distinct "
+                 "combination gets one placeholder number, written into all of these columns "
+                 "in that row (a blank cell stays blank).",
+            wraplength=460, justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        part_vars = []
+        for i in range(3):
+            caption = f"Column {i + 1}:" if i < 2 else "Column 3 (optional):"
+            ttk.Label(body, text=caption).grid(row=1 + i, column=0, sticky="w", pady=2, padx=(0, 8))
+            var = tk.StringVar(value=available[i] if i < 2 else NONE)
+            values = available if i < 2 else [NONE] + available
+            ttk.Combobox(body, textvariable=var, values=values, state="readonly", width=36).grid(
+                row=1 + i, column=1, sticky="w", pady=2
+            )
+            part_vars.append(var)
+
+        ttk.Label(body, text="Placeholder label:").grid(row=4, column=0, sticky="w", pady=(10, 2), padx=(0, 8))
+        label_var = tk.StringVar(value="Name")
+        label_entry = ttk.Entry(body, textvariable=label_var, width=20)
+        label_entry.grid(row=4, column=1, sticky="w", pady=(10, 2))
+
+        link_var = None
+        if self.entity_labels:
+            ttk.Label(body, text="Same identity as:").grid(row=5, column=0, sticky="w", pady=2, padx=(0, 8))
+            link_var = tk.StringVar(value=_BATCH_NO_IDENTITY_LINK)
+            link_combo = ttk.Combobox(
+                body, textvariable=link_var, values=[_BATCH_NO_IDENTITY_LINK] + self.entity_labels,
+                state="readonly", width=36,
+            )
+            link_combo.grid(row=5, column=1, sticky="w", pady=2)
+
+            def on_link(_event=None):
+                if link_var.get() == _BATCH_NO_IDENTITY_LINK:
+                    label_entry.configure(state="normal")
+                    label_var.set("Name")
+                else:
+                    label_var.set(link_var.get())
+                    label_entry.configure(state="disabled")
+            link_combo.bind("<<ComboboxSelected>>", on_link)
+            ttk.Label(
+                body,
+                text="To match Dentrix patient names, put the LAST-name column first: a linked "
+                     "combination is compared as \"Last, First\", the way Dentrix lists patients. "
+                     "Names that don't match get their own new number -- never someone else's.",
+                wraplength=460, justify="left", foreground="#a15c00",
+            ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        preview_var = tk.StringVar()
+        ttk.Label(body, textvariable=preview_var, foreground="#555", wraplength=460, justify="left").grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
+        def chosen_parts():
+            return [v.get() for v in part_vars if v.get() and v.get() != NONE]
+
+        def refresh(*_args):
+            parts = chosen_parts()
+            lab = label_var.get().strip() or "label"
+            preview_var.set(
+                f"Result: each distinct {' + '.join(parts) or '...'} combination becomes "
+                f"<{lab} 1>, <{lab} 2>, ... in all {len(parts)} column(s)."
+            )
+        for v in part_vars:
+            v.trace_add("write", refresh)
+        label_var.trace_add("write", refresh)
+        refresh()
+
+        def on_ok():
+            parts = chosen_parts()
+            label = label_var.get().strip()
+            if len(parts) < 2:
+                messagebox.showerror(APP_TITLE, "Pick at least two columns.", parent=dlg)
+                return
+            if len(set(parts)) != len(parts):
+                messagebox.showerror(APP_TITLE, "The same column is picked more than once.", parent=dlg)
+                return
+            if not label:
+                messagebox.showerror(APP_TITLE, "Enter a placeholder label (e.g. Name).", parent=dlg)
+                return
+            link = None
+            if link_var is not None and link_var.get() != _BATCH_NO_IDENTITY_LINK:
+                link = link_var.get()
+            self._add_group(parts, label, link)
+            dlg.destroy()
+
+        btns = ttk.Frame(body)
+        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(btns, text="Combine", command=on_ok).pack(side="right", padx=(0, 6))
+        try:
+            dlg.wait_visibility()
+            dlg.grab_set()
+        except tk.TclError:
+            pass
 
 
 class DocumentRedactorApp(tk.Tk):
@@ -737,15 +991,22 @@ class DocumentRedactorApp(tk.Tk):
             text="Check the column(s) to redact. The same value in a column always gets "
                  "the same placeholder wherever it recurs in that column (numbering is "
                  "independent per column). Edit the label if you don't want the column's "
-                 "own name -- the placeholder written will be <label 1>, <label 2>, etc.",
+                 "own name -- the placeholder written will be <label 1>, <label 2>, etc. "
+                 "To redact two columns as one identity (First Name + Last Name -> <Name 1>), "
+                 "use Combine Columns below instead of ticking them.",
             wraplength=900, justify="left", foreground="#444",
         ).pack(anchor="w", pady=(0, 8))
+        self.combined_section = _CombinedColumnsSection(self, self.spreadsheet_panel)
+        self.combined_section.frame.pack(side="bottom", fill="x", pady=(8, 0))
         col_scroll_outer, self.column_list_inner = self._build_scrollable_frame(self.spreadsheet_panel)
         col_scroll_outer.pack(fill="both", expand=True)
         self.column_vars = {}
 
         bottom = ttk.Frame(root)
-        bottom.pack(fill="x", padx=10, pady=10)
+        # Anchored to the bottom and given its space before the result
+        # panel, so "Redact & Save" can never be pushed out of view on a
+        # small window by a long column list or the combine-columns panel.
+        bottom.pack(side="bottom", fill="x", padx=10, pady=10, before=self.result_container)
         self.redact_btn = ttk.Button(
             bottom, text="Redact && Save...", command=self.on_redact_save, state="disabled"
         )
@@ -870,6 +1131,9 @@ class DocumentRedactorApp(tk.Tk):
         for child in self.column_list_inner.winfo_children():
             child.destroy()
         self.column_vars = {}
+        section = getattr(self, "combined_section", None)
+        if section is not None:
+            section.clear()
 
     def _populate_column_checklist(self, columns):
         self._clear_column_checklist()
@@ -884,7 +1148,8 @@ class DocumentRedactorApp(tk.Tk):
 
             sel_var = tk.BooleanVar(value=False)
             label_var = tk.StringVar(value=col.default_label)
-            ttk.Checkbutton(row, variable=sel_var).pack(side="left")
+            check = ttk.Checkbutton(row, variable=sel_var)
+            check.pack(side="left")
 
             sheets_note = f"  (sheet(s): {', '.join(col.sheets)})" if len(col.sheets) > 1 else ""
             sample_note = f'  --  e.g. "{col.sample}"' if col.sample else "  --  (no sample value found)"
@@ -933,7 +1198,10 @@ class DocumentRedactorApp(tk.Tk):
                 link_combo.bind("<<ComboboxSelected>>", on_link_change)
                 link_combo.pack(side="left")
 
-            self.column_vars[col.name] = {"selected": sel_var, "label": label_var, "shared_identity": link_var}
+            self.column_vars[col.name] = {
+                "selected": sel_var, "label": label_var, "shared_identity": link_var, "check": check,
+            }
+        self.combined_section.reset([c.name for c in columns], self.column_vars, entity_labels)
 
     def on_redact_add_existing_keys(self):
         doc_type = self.current_doc_type
@@ -1656,8 +1924,9 @@ class DocumentRedactorApp(tk.Tk):
                 if chosen and chosen != _BATCH_NO_IDENTITY_LINK:
                     shared_label = chosen
             selected.append({"name": name, "label": label, "shared_identity_label": shared_label})
+        selected.extend(self.combined_section.selections())
         if not selected:
-            messagebox.showinfo(APP_TITLE, "Check at least one column to redact.")
+            messagebox.showinfo(APP_TITLE, "Check at least one column (or combine columns) to redact.")
             return
 
         existing_state, key_error = self._resolve_redact_existing_numbering()
@@ -1744,6 +2013,9 @@ class DocumentRedactorApp(tk.Tk):
                     shared_label = col["shared_identity_label"]
                     pool = working_pools.setdefault(shared_label, {})
                     normalize_fn = (cross_normalize_fns or {}).get(shared_label, _default_normalize_identity)
+                    if col.get("combine"):
+                        _seed_linked_combination(doc_type, self.input_path, col, state, pool, normalize_fn)
+                        continue
                     distinct_values = doc_type.distinct_values_in_column(self.input_path, col["name"])
                     seed = state.setdefault(col["name"], {})
                     # Sorted, not raw set-iteration order: distinct_values is
@@ -1891,6 +2163,13 @@ class DocumentRedactorApp(tk.Tk):
                 "this output after manual review -- do NOT treat this file as fully "
                 "de-identified without checking why. Exact location and value for each one "
                 f"is in the review log:\n{review_log_path or '(could not be saved)'}"
+            )
+        if summary.get("combined_parts_missing"):
+            shown = ", ".join(summary["combined_parts_missing"])
+            msg += (
+                "\n\nNote: some sheets have only part of a combination -- the missing part(s) "
+                f"were treated as blank there: {shown}. The same person can therefore get a "
+                "different number on those sheets."
             )
         if summary["columns_not_found"]:
             shown = ", ".join(summary["columns_not_found"])
@@ -2932,6 +3211,12 @@ class DocumentRedactorApp(tk.Tk):
         self.batch_column_frame.configure(height=240)
         self.batch_column_frame.pack_propagate(False)
 
+        # Shown/hidden together with batch_column_frame by
+        # _refresh_batch_panels().
+        self.batch_combined_section = _CombinedColumnsSection(
+            self, body, on_change=self._update_batch_redact_btn_state
+        )
+
         self.batch_out_row = ttk.Frame(body)
         self.batch_out_row.pack(fill="x", **pad)
         ttk.Label(self.batch_out_row, text="Save redacted files to:").pack(side="left")
@@ -3018,8 +3303,10 @@ class DocumentRedactorApp(tk.Tk):
         has_spreadsheet = any(self._is_spreadsheet_type(f["doc_type"]) for f in self.batch_files)
         if has_spreadsheet:
             self.batch_column_frame.pack(fill="both", expand=True, padx=10, pady=6, before=self.batch_out_row)
+            self.batch_combined_section.frame.pack(fill="x", padx=10, pady=(0, 6), before=self.batch_out_row)
         else:
             self.batch_column_frame.pack_forget()
+            self.batch_combined_section.frame.pack_forget()
 
     def on_batch_add_files(self):
         if not self.batch_doc_types:
@@ -3098,11 +3385,17 @@ class DocumentRedactorApp(tk.Tk):
         for child in self.batch_column_list_inner.winfo_children():
             child.destroy()
         self.batch_column_vars = {}
+        section = getattr(self, "batch_combined_section", None)
+        if section is not None:
+            section.clear()
 
     def _update_batch_redact_btn_state(self):
         ok = bool(self.batch_files) and bool(self.batch_output_dir)
         if ok and any(self._is_spreadsheet_type(f["doc_type"]) for f in self.batch_files):
-            ok = any(v["selected"].get() for v in self.batch_column_vars.values())
+            section = getattr(self, "batch_combined_section", None)
+            ok = any(v["selected"].get() for v in self.batch_column_vars.values()) or bool(
+                section is not None and section.groups
+            )
         self.batch_redact_btn.configure(state="normal" if ok else "disabled")
 
     def on_batch_load_columns(self):
@@ -3176,7 +3469,8 @@ class DocumentRedactorApp(tk.Tk):
 
             sel_var = tk.BooleanVar(value=False)
             label_var = tk.StringVar(value=info["default_label"])
-            ttk.Checkbutton(row, variable=sel_var, command=self._update_batch_redact_btn_state).pack(side="left")
+            check = ttk.Checkbutton(row, variable=sel_var, command=self._update_batch_redact_btn_state)
+            check.pack(side="left")
 
             found_note = f"  (found in {info['file_count']} of {n_files} file(s))"
             sample_note = f'  --  e.g. "{info["sample"]}"' if info["sample"] else "  --  (no sample value found)"
@@ -3221,7 +3515,10 @@ class DocumentRedactorApp(tk.Tk):
                 link_combo.bind("<<ComboboxSelected>>", on_link_change)
                 link_combo.pack(side="left")
 
-            self.batch_column_vars[name] = {"selected": sel_var, "label": label_var, "shared_identity": link_var}
+            self.batch_column_vars[name] = {
+                "selected": sel_var, "label": label_var, "shared_identity": link_var, "check": check,
+            }
+        self.batch_combined_section.reset(order, self.batch_column_vars, entity_labels)
 
         self.batch_summary_var.set(
             f"{len(order)} column(s) found across {n_files} spreadsheet file(s). Check the "
@@ -3268,8 +3565,9 @@ class DocumentRedactorApp(tk.Tk):
                     if val and val != _BATCH_NO_IDENTITY_LINK:
                         shared_label = val
                 selected_columns.append({"name": name, "label": label, "shared_identity_label": shared_label})
+            selected_columns.extend(self.batch_combined_section.selections())
             if not selected_columns:
-                messagebox.showinfo(APP_TITLE, "Check at least one column to redact.")
+                messagebox.showinfo(APP_TITLE, "Check at least one column (or combine columns) to redact.")
                 return
 
         # Every output filename is derived from its own source file's name
@@ -3414,6 +3712,9 @@ class DocumentRedactorApp(tk.Tk):
                         identity_key = (_BATCH_IDENTITY_PREFIX, shared_label)
                         pool = state.setdefault(identity_key, {})
                         normalize_fn = normalize_fns.get(shared_label, _default_normalize_identity)
+                        if col.get("combine"):
+                            _seed_linked_combination(dt, input_path, col, state, pool, normalize_fn)
+                            continue
                         distinct_values = dt.distinct_values_in_column(input_path, col["name"])
                         seed = state.setdefault(col["name"], {})
                         # Sorted, not raw set-iteration order -- see the

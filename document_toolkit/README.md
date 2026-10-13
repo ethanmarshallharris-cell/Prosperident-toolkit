@@ -134,6 +134,49 @@ deliberate, manual choice -- never guessed from a column's name -- and two
 loaded key files that disagree about the same person's number are
 reported and blocked rather than silently resolved.
 
+## Combining columns into one placeholder (e.g. First Name + Last Name)
+
+When a person's identity is split across columns -- a "First Name" and a
+"Last Name" column, say -- redacting each column on its own numbers the
+fragments, not the people: John Smith and John Doe would share
+`<First_Name 1>`, and Mary Smith would share `<Last_Name 1>` with John.
+**Combine Columns...** (below the column checklist, on both the Redact and
+Batch Redact tabs) redacts them together instead:
+
+1. Click **Combine Columns...**, pick the columns (two, or three for e.g.
+   a middle name), and set the placeholder label (default "Name").
+2. Each distinct combination gets one number -- John Smith is `<Name 1>`
+   wherever he appears, John Doe `<Name 2>`, Mary Smith `<Name 3>` -- and
+   that placeholder is written into every combined column of the row
+   (First Name = `<Name 1>`, Last Name = `<Name 1>`). A blank cell stays
+   blank. A combined column's own checkbox is disabled while it is
+   combined; **Remove** undoes the combination.
+3. Redact as usual. The columns are matched by header, so a sheet with
+   the columns in a different order (Last Name before First Name) still
+   gives the same person the same number. A sheet that has only one of the
+   columns is still redacted -- the missing part counts as blank, so the
+   same person can get a different number there; the completion message
+   names any such sheet.
+
+Matching is exact, like a single column: "John" and "john" are different
+combinations, because un-redaction has to put back each cell's exact text.
+
+The key file stores one ordinary row per column (`First Name, <Name 1>,
+John` and `Last Name, <Name 1>, Smith`) -- which is what the Un-redact tab
+uses, so un-redaction works exactly as for any other column -- plus one
+`Combined: First Name + Last Name` row per combination, which is what
+"Use existing key file(s)" and Batch Redact use to keep numbering
+consistent across files. Combine the columns in the same order each time
+for that carry-over to apply.
+
+**Linking a combination to a PDF's patients.** When a Dentrix Audit Trail
+key file is loaded (Redact tab) or a Dentrix PDF is in the batch (Batch
+Redact), the Combine dialog offers **Same identity as: Patient**. Put the
+**last-name column first**: the combination is compared as "Last, First",
+the way Dentrix lists patients, so Smith + John matches the PDF's
+"Smith, John" and gets the same `<Patient N>`. A name that doesn't match
+gets its own new number -- never someone else's.
+
 ## Batch Redact tab
 
 Redacts several files together, in one run, so that the same real-world

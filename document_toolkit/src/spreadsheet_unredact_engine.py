@@ -134,6 +134,15 @@ _PLACEHOLDER_SHAPE_RE = re.compile(r"^<[^<>]+ \d+>$")
 # so can make no assumption about a placeholder ever being alone in a cell.
 _PLACEHOLDER_SCAN_RE = re.compile(r"<[^<>]+ \d+>")
 
+# Prefix of the summary rows a combined-columns redaction writes to its
+# key file (see excel_spreadsheet.py's "COMBINED COLUMNS" docstring
+# section) -- "Combined: First Name + Last Name", <Name 3>, '["John",
+# "Smith"]'. They record numbering, not a real column's cell value: each
+# part's value is also written on its own ordinary row under its real
+# header, which is what un-redaction uses. So these rows are skipped when
+# reading a key. Kept in step with excel_spreadsheet.COMBINED_COLUMN_PREFIX.
+COMBINED_COLUMN_PREFIX = "Combined: "
+
 # Reserved key_mapping "column name" for a flat/generic key's entries (see
 # module docstring) -- guaranteed to never collide with a real column
 # header, which is always a non-empty string pulled straight from a
@@ -250,6 +259,8 @@ def read_key_csv(key_path: str) -> dict:
             continue
         if len(row) >= 3:
             column, placeholder, value = row[0], row[1], row[2]
+            if column.startswith(COMBINED_COLUMN_PREFIX):
+                continue
             mapping.setdefault(column, {})[placeholder] = value
 
     if not mapping:

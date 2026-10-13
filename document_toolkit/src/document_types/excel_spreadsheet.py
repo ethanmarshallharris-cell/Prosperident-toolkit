@@ -36,6 +36,42 @@ that has it, not just the first. A sheet with none of the chosen column
 names is left completely untouched.
 
 --------------------------------------------------------------------------
+COMBINED COLUMNS (added October 2026)
+--------------------------------------------------------------------------
+Two or more columns can be redacted together as ONE identity -- e.g. a
+"First Name" column and a "Last Name" column redacted as <Name 1>,
+<Name 2>, ... where each number stands for a distinct first+last
+COMBINATION, not for a first name or a last name on its own. (Redacted
+separately, "John Smith" and "John Doe" would share <First_Name 1> and
+"Mary Smith" would share <Last_Name 1> with John Smith -- the numbering
+would describe fragments, not people.)
+
+A combined entry in `selected_columns` looks like
+    {"name": combined_column_name(parts), "label": "Name", "combine": parts}
+with `parts` the real header names in the user's chosen order. Every
+part cell that has a value is overwritten with the SAME placeholder, so a
+redacted row reads First Name = <Name 3>, Last Name = <Name 3>. A blank
+part stays blank; a row where every part is blank is left alone.
+
+The key file records, for each combination:
+  - one row per part, under that part's own real column name
+    ("First Name", <Name 3>, "John") and ("Last Name", <Name 3>, "Smith")
+    -- exactly the ordinary row shape, so spreadsheet_unredact_engine.py
+    restores each cell by its header with no special handling (and an
+    older copy of the app can still un-redact the file); and
+  - one summary row under the combined column name
+    ("Combined: First Name + Last Name", <Name 3>, '["John", "Smith"]')
+    -- the combination itself, JSON-encoded so a value containing spaces
+    or punctuation can never be confused with a different split. This is
+    what "Use existing key file(s)" and Batch Redact read to give the same
+    person the same number in the next file. The un-redact engine skips
+    these rows (they name no real column).
+
+Identity: two rows are the same combination only if every part matches
+exactly (same rule as a single column -- no case folding, no trimming),
+because un-redaction must put back each cell's exact original text.
+
+--------------------------------------------------------------------------
 WHY THIS COUNTS AS TRUE REDACTION
 --------------------------------------------------------------------------
 Cell values are set directly (cell.value = placeholder_text) and the
@@ -77,6 +113,7 @@ KNOWN LIMITATIONS
   for redaction) -- the other cells in the merge have no value to find.
 """
 import csv
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -113,6 +150,98 @@ NO_MATCHES_WARNING = (
     "header), columns can't be auto-detected. Check the file's layout, or "
     "move the header row to row 1 and try again."
 )
+
+
+# Prefix of the synthetic column name a combined-columns entry uses in
+# selected_columns, in `state`, and in the key file's summary rows. Must
+# match spreadsheet_unredact_engine.COMBINED_COLUMN_PREFIX (kept as a
+# separate constant there on purpose -- the two modules don't import each
+# other).
+COMBINED_COLUMN_PREFIX = "Combined: "
+_COMBINED_PART_SEPARATOR = " + "
+
+
+def combined_column_name(parts: List[str]) -> str:
+    """The synthetic name for a combined-columns entry, e.g.
+    "Combined: First Name + Last Name". Part order matters (it is the
+    order values are stored in), so the same columns combined in a
+    different order are a different entry."""
+    return COMBINED_COLUMN_PREFIX + _COMBINED_PART_SEPARATOR.join(parts)
+
+
+def is_combined_column_name(name) -> bool:
+    return isinstance(name, str) and name.startswith(COMBINED_COLUMN_PREFIX)
+
+
+def encode_combined_value(values) -> str:
+    """One combination of part values -> the string stored as its "real
+    value" in state and in the key file's summary row. JSON, so the split
+    between parts is unambiguous whatever the values contain."""
+    return json.dumps([str(v) for v in values], ensure_ascii=False)
+
+
+def decode_combined_value(text: str) -> List[str]:
+    values = json.loads(text)
+    if not isinstance(values, list):
+        raise ValueError("not a combined value")
+    return [str(v) for v in values]
+
+
+def combined_identity_text(values) -> str:
+    """The text used to compare a combination against another document
+    type's identities (cross-type "Same identity as:" linking): the
+    non-blank parts joined with ", " in the order the user chose. With the
+    last-name column first this reads "Smith, John" -- the way Dentrix
+    writes patient names -- so the linked type's own normalize_identity()
+    can match it. No reordering is ever guessed (see base.py)."""
+    return ", ".join(str(v).strip() for v in values if str(v).strip())
+
+
+def _split_selection(selected_columns: List[dict]):
+    """(plain {name: label}, [combined entries]) from a selected_columns
+    list, after checking no real column is used twice -- once on its own
+    and once in a combination, or in two combinations. Either would make
+    one cell receive two different placeholders, so it is refused."""
+    plain = {}
+    groups = []
+    used = {}
+    for entry in selected_columns:
+        parts = entry.get("combine")
+        if parts:
+            parts = [str(p) for p in parts]
+            if len(parts) < 2:
+                raise ValueError(f"A combined entry needs at least two columns: {parts}")
+            if len(set(parts)) != len(parts):
+                raise ValueError(f"The same column is listed twice in one combination: {parts}")
+            owner = entry.get("name") or combined_column_name(parts)
+            for p in parts:
+                if p in used:
+                    raise ValueError(f'Column "{p}" is selected more than once ({used[p]} and {owner}).')
+                used[p] = owner
+            groups.append({"name": owner, "label": entry["label"], "parts": parts})
+        else:
+            name = entry["name"]
+            if name in used:
+                raise ValueError(f'Column "{name}" is selected more than once ({used[name]} and on its own).')
+            used[name] = "on its own"
+            plain[name] = entry["label"]
+    return plain, groups
+
+
+def _combined_key_rows(group_name: str, parts: List[str], value_map: Dict[str, str]) -> List[dict]:
+    """Key rows for one combined entry: a summary row per combination plus
+    one ordinary row per non-blank part (see module docstring)."""
+    rows = []
+    for encoded, placeholder in value_map.items():
+        rows.append({"column": group_name, "placeholder": placeholder, "value": encoded})
+        try:
+            values = decode_combined_value(encoded)
+        except (ValueError, TypeError):
+            continue
+        for part, value in zip(parts, values):
+            if value.strip():
+                rows.append({"column": part, "placeholder": placeholder, "value": value})
+    return rows
 
 
 @dataclass
@@ -266,6 +395,50 @@ def distinct_values_in_column(path: str, column_name: str) -> "set[str]":
         wb.close()
 
 
+def distinct_combined_values(path: str, parts: List[str]) -> "set[tuple]":
+    """Every distinct combination of the given columns' values (a tuple
+    of str, "" for a blank part) across every sheet that has at least one
+    of them in row 1. Rows where every part is blank are skipped. Read-only.
+
+    The combined-columns counterpart of distinct_values_in_column(), for
+    cross-type identity linking of a combination (e.g. First + Last Name
+    linked to the Dentrix "Patient" identity)."""
+    wb = _open_workbook(path, read_only=True, data_only=True)
+    try:
+        combos = set()
+        for ws in wb.worksheets:
+            rows = ws.iter_rows()
+            try:
+                header_row = next(rows)
+            except StopIteration:
+                continue
+            idx_by_part = {}
+            for cell in header_row:
+                if cell.value is None:
+                    continue
+                text = str(cell.value).strip()
+                if text in parts and text not in idx_by_part:
+                    idx_by_part[text] = cell.column
+            if not idx_by_part:
+                continue
+            for row in rows:
+                by_col = {}
+                for cell in row:
+                    # .value before .column -- see list_columns().
+                    if cell.value in (None, ""):
+                        continue
+                    by_col[cell.column] = cell.value
+                values = []
+                for p in parts:
+                    v = by_col.get(idx_by_part.get(p))
+                    values.append("" if v is None or str(v).strip() == "" else str(v))
+                if any(v for v in values):
+                    combos.add(tuple(values))
+        return combos
+    finally:
+        wb.close()
+
+
 def apply_column_redaction(
     input_path: str,
     output_path: str,
@@ -279,7 +452,10 @@ def apply_column_redaction(
     [{"name": <exact header text>, "label": <placeholder label to use>}, ...]
     -- `label` is what goes inside the angle brackets; the caller (the GUI)
     is responsible for defaulting it to the column's own sanitized name and
-    letting the user override it.
+    letting the user override it. An entry with a "combine" list redacts
+    those columns together as one identity -- see the module docstring's
+    "COMBINED COLUMNS" section. Its `state` entry is keyed by its synthetic
+    combined_column_name(), with encode_combined_value() strings as values.
 
     The same real value always gets the same placeholder within its own
     column (independent numbering per column -- see module docstring).
@@ -318,15 +494,21 @@ def apply_column_redaction(
                 the whole batch (a column absent from the last file
                 wouldn't otherwise be represented).
     """
-    label_by_name = {c["name"]: c["label"] for c in selected_columns}
+    label_by_name, groups = _split_selection(selected_columns)
+    all_parts = {p for g in groups for p in g["parts"]}
     wb = _open_workbook(input_path)
     try:
         # Pass 1: find which sheets have which chosen columns, and the
         # total row count across them, so progress can be reported.
         sheet_col_map = {}   # ws.title -> {col_idx: header_name}
+        sheet_group_map = {}  # ws.title -> [(group, {part: col_idx or None}), ...]
         found_names = set()
+        found_groups = set()
+        parts_missing = []    # "Last Name (sheet 'Visits')" -- a combination found on a
+                              # sheet that lacks one of its parts (treated as blank there)
         for ws in wb.worksheets:
             col_idx_by_name = {}
+            idx_by_header = {}
             try:
                 header_row = next(ws.iter_rows(min_row=1, max_row=1))
             except StopIteration:
@@ -338,11 +520,23 @@ def apply_column_redaction(
                 if text in label_by_name:
                     col_idx_by_name[cell.column] = text
                     found_names.add(text)
+                if text in all_parts and text not in idx_by_header:
+                    idx_by_header[text] = cell.column
             if col_idx_by_name:
                 sheet_col_map[ws.title] = col_idx_by_name
+            for g in groups:
+                idx_by_part = {p: idx_by_header.get(p) for p in g["parts"]}
+                if any(i is not None for i in idx_by_part.values()):
+                    sheet_group_map.setdefault(ws.title, []).append((g, idx_by_part))
+                    found_groups.add(g["name"])
+                    for p, i in idx_by_part.items():
+                        if i is None:
+                            parts_missing.append(f"{p} (sheet '{ws.title}')")
 
+        redacted_titles = list(sheet_col_map)
+        redacted_titles += [t for t in sheet_group_map if t not in sheet_col_map]
         total_rows = sum(
-            max(wb[title].max_row - 1, 0) for title in sheet_col_map
+            max(wb[title].max_row - 1, 0) for title in redacted_titles
         )
 
         state = state or {}
@@ -356,13 +550,44 @@ def apply_column_redaction(
         # correct whether those came from this file or were carried forward,
         # since placeholders are always assigned as a gapless 1..N sequence.
         counters = {name: len(placeholder_maps[name]) for name in found_names}
+        group_maps: "Dict[str, Dict[str, str]]" = {
+            g["name"]: dict(state.get(g["name"], {})) for g in groups if g["name"] in found_groups
+        }
+        group_counters = {name: len(m) for name, m in group_maps.items()}
         cells_redacted = 0
         current = 0
 
-        for title, col_idx_by_name in sheet_col_map.items():
+        for title in redacted_titles:
+            col_idx_by_name = sheet_col_map.get(title, {})
+            sheet_groups = sheet_group_map.get(title, [])
             ws = wb[title]
             for row in ws.iter_rows(min_row=2):
                 current += 1
+                if sheet_groups:
+                    cell_by_col = {}
+                    for cell in row:
+                        col = getattr(cell, "column", None)
+                        if col is not None:
+                            cell_by_col[col] = cell
+                    for g, idx_by_part in sheet_groups:
+                        part_cells = [cell_by_col.get(i) if i is not None else None for i in idx_by_part.values()]
+                        values = [
+                            "" if c is None or c.value is None or str(c.value).strip() == "" else str(c.value)
+                            for c in part_cells
+                        ]
+                        if not any(values):
+                            continue
+                        encoded = encode_combined_value(values)
+                        g_map = group_maps[g["name"]]
+                        placeholder_text = g_map.get(encoded)
+                        if placeholder_text is None:
+                            group_counters[g["name"]] += 1
+                            placeholder_text = f"<{g['label']} {group_counters[g['name']]}>"
+                            g_map[encoded] = placeholder_text
+                        for c, v in zip(part_cells, values):
+                            if c is not None and v:
+                                c.value = placeholder_text
+                                cells_redacted += 1
                 for cell in row:
                     col_name = col_idx_by_name.get(cell.column)
                     if col_name is None:
@@ -395,14 +620,22 @@ def apply_column_redaction(
         for col_name, col_map in placeholder_maps.items():
             for value_str, placeholder_text in col_map.items():
                 key_rows.append({"column": col_name, "placeholder": placeholder_text, "value": value_str})
+        for g in groups:
+            if g["name"] in group_maps:
+                key_rows.extend(_combined_key_rows(g["name"], g["parts"], group_maps[g["name"]]))
 
         not_found = sorted(set(label_by_name) - found_names)
+        not_found += [g["name"] for g in groups if g["name"] not in found_groups]
         summary = {
             "columns_selected": len(selected_columns),
-            "columns_found": len(found_names),
+            "columns_found": len(found_names) + len(found_groups),
             "columns_not_found": not_found,
+            "combined_parts_missing": parts_missing,
             "cells_redacted": cells_redacted,
-            "unique_values_redacted": sum(len(m) for m in placeholder_maps.values()),
+            "unique_values_redacted": (
+                sum(len(m) for m in placeholder_maps.values())
+                + sum(len(m) for m in group_maps.values())
+            ),
         }
         return summary, key_rows
     finally:
@@ -536,6 +769,11 @@ def verify_column_redaction(input_path: str, output_path: str, selected_columns:
     # placeholder tag, not the value itself).
     placeholders_by_value: "Dict[str, List[dict]]" = {}
     for row in key_rows:
+        if is_combined_column_name(row["column"]):
+            # A combination's summary row -- its "value" is the JSON
+            # encoding, never a cell's text. Its parts are checked through
+            # their own ordinary rows.
+            continue
         placeholders_by_value.setdefault(row["value"], []).append(
             {"column": row["column"], "placeholder": row["placeholder"]}
         )
@@ -732,7 +970,7 @@ def existing_numbering_from_key(key_path: str) -> dict:
         rows = list(csv.reader(f))
 
     header_seen = False
-    state = {}
+    table = []
     for row in rows:
         if not row:
             continue
@@ -741,8 +979,24 @@ def existing_numbering_from_key(key_path: str) -> dict:
                 header_seen = True
             continue
         if len(row) >= 3:
-            column, placeholder, value = row[0], row[1], row[2]
-            state.setdefault(column, {})[value] = placeholder
+            table.append((row[0], row[1], row[2]))
+
+    # A combination's per-part rows ("First Name", <Name 3>, "John") are
+    # only there for un-redaction -- numbering is carried by its summary
+    # row. Left in, they would map "John" to whichever combination was
+    # listed last, and make two genuinely compatible key files look like
+    # they conflict.
+    combined_part_rows = set()
+    for column, placeholder, value in table:
+        if is_combined_column_name(column):
+            for part in column[len(COMBINED_COLUMN_PREFIX):].split(_COMBINED_PART_SEPARATOR):
+                combined_part_rows.add((part, placeholder))
+
+    state = {}
+    for column, placeholder, value in table:
+        if (column, placeholder) in combined_part_rows:
+            continue
+        state.setdefault(column, {})[value] = placeholder
 
     if not header_seen:
         raise ValueError(
