@@ -361,6 +361,43 @@ added by mistake, or a key file from a different document entirely), so
 fix the file selection and try again rather than expecting the tool to
 pick one for you.
 
+## Un-redacting a Word document (.docx)
+
+The Un-redact tab also accepts a Word document that **quotes** placeholders --
+typically a report or memo drafted from redacted files (a redacted audit
+trail, a redacted export, an analysis written from them). Pick the .docx and
+every key CSV its placeholders came from -- PDF name keys and spreadsheet
+redaction keys can be mixed -- and click **Un-redact & Save...**. You get a
+new copy with every `<Patient 7>`, `<Name 3>` etc. replaced by the real value;
+the original is not changed.
+
+- **Everywhere text lives:** body, tables, headers, footers, footnotes,
+  endnotes, comments, text boxes, chart and SmartArt labels, and the
+  document's title/subject properties. Text deleted under tracked changes
+  is left alone. Not changed: the spreadsheet data stored behind a chart
+  ("Edit Data" in Word) and pictures of text.
+- **Formatting is kept.** Word often stores one word in several pieces
+  (`<Pat` in bold + `ient 7>` in italics); the real value is written where
+  the placeholder starts, in that formatting. Nothing else in the file is
+  touched -- styles, tables, images and layout are copied exactly.
+- **Combined columns** (see above) come back as one name: "John Smith", or
+  "Smith, John" when the last-name column was combined first.
+- **When the keys disagree.** A Word document has no columns, so if the
+  same placeholder has more than one possible value -- the same label typed
+  for two columns, or a PDF key and a spreadsheet key spelling one patient
+  differently -- a **Choose values** window asks which to use (or to leave
+  the placeholder). Each choice applies everywhere that placeholder appears.
+- **What the completion message tells you:** placeholders still in the
+  document (no loaded key knows them, or you chose to leave them), and
+  mentions like **"Patient 7" without the < > brackets** -- common when text
+  was retyped or rewritten by an AI tool. Those are never changed
+  automatically (the bare words could be ordinary text); fix them with
+  Word's Find & Replace.
+- **Self-check:** the saved file is re-opened and confirmed to be a valid
+  Word document with none of the replaced placeholders left; if not, it is
+  deleted and nothing is delivered.
+- Only .docx is supported -- save an older .doc as .docx in Word first.
+
 ## If the tool ever refuses to save a file
 
 The self-check exists so a questionable file never reaches you looking

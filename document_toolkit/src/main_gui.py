@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import document_types
 import unredact_engine
 import spreadsheet_unredact_engine
+import word_unredact_engine
 
 # update_check.py and branding.py ship alongside this file in the GitHub
 # repository (document_toolkit/src/). Imported defensively so a local
@@ -4069,9 +4070,10 @@ class DocumentRedactorApp(tk.Tk):
             text="Reverse a previous redaction: pick a file and the key CSV(s) that go with "
                  "it, and get back a copy with every placeholder swapped for the real value "
                  "it replaced. Works for a redacted PDF, a redacted Excel workbook, or a "
-                 "redacted workbook re-saved as a CSV -- which this is gets detected "
-                 "automatically from the file you pick -- regardless of which document type "
-                 "originally produced it. The file doesn't have to be the exact one that was "
+                 "redacted workbook re-saved as a CSV, or a Word document (.docx) that quotes "
+                 "placeholders -- e.g. a report drafted from redacted files -- which this is "
+                 "gets detected automatically from the file you pick -- regardless of which "
+                 "document type originally produced it. The file doesn't have to be the exact one that was "
                  "redacted, either: an Excel/CSV file can be ANY file that quotes the same "
                  "<Label N> placeholders (a downstream analysis or summary workbook, for "
                  "instance) -- pick its key CSV the same way, and every placeholder it "
@@ -4129,9 +4131,11 @@ class DocumentRedactorApp(tk.Tk):
         path = filedialog.askopenfilename(
             title="Select the redacted file",
             filetypes=[
-                ("Redacted files", "*.pdf *.xlsx"),
+                ("Redacted files", "*.pdf *.xlsx *.csv *.docx"),
                 ("PDF files", "*.pdf"),
                 ("Excel files", "*.xlsx"),
+                ("CSV files", "*.csv"),
+                ("Word documents", "*.docx"),
                 ("All files", "*.*"),
             ],
         )
@@ -4178,6 +4182,8 @@ class DocumentRedactorApp(tk.Tk):
         ext = os.path.splitext(path)[1].lower()
         if ext in (".xlsx", ".csv"):
             return spreadsheet_unredact_engine, "spreadsheet"
+        if ext == ".docx":
+            return word_unredact_engine, "word"
         return unredact_engine, "pdf"
 
     def on_unredact_save(self):
@@ -4228,8 +4234,35 @@ class DocumentRedactorApp(tk.Tk):
             )
             return
 
+        if kind == "word":
+            # A Word document has no columns to tell a reused placeholder
+            # apart, so any placeholder the key file(s) give more than one
+            # value for -- and that this document actually contains -- is
+            # settled by the user now, before anything is written (see
+            # word_unredact_engine.py's module docstring).
+            try:
+                needs = engine.placeholders_needing_choice(self.unredact_pdf_path, key_mapping)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(
+                    APP_TITLE,
+                    f"Could not read this Word document:\n\n{self.unredact_pdf_path}\n\n"
+                    f"{type(exc).__name__}: {exc}\n\nMake sure it is a .docx file (not an older .doc) "
+                    "and that it isn't open with unsaved changes.",
+                )
+                return
+            choices = {}
+            if needs:
+                choices = self._ask_word_placeholder_choices(needs)
+                if choices is None:
+                    self.unredact_summary_var.set("Cancelled -- nothing was un-redacted.")
+                    return
+            key_mapping = engine.resolve_mapping(key_mapping, choices)
+
         base = os.path.splitext(os.path.basename(self.unredact_pdf_path))[0]
-        if kind == "spreadsheet":
+        if kind == "word":
+            out_ext = ".docx"
+            save_filetypes = [("Word documents", "*.docx")]
+        elif kind == "spreadsheet":
             # Preserve whatever format the file we were HANDED is in --
             # .xlsx stays .xlsx, .csv stays .csv -- rather than always
             # forcing .xlsx. If the redacted file already drifted to CSV
@@ -4298,7 +4331,7 @@ class DocumentRedactorApp(tk.Tk):
             f"placeholder(s) known, output: {output_path}",
         )
 
-        self._unredact_progress_unit = "row" if kind == "spreadsheet" else "page"
+        self._unredact_progress_unit = {"spreadsheet": "row", "word": "part"}.get(kind, "page")
         progress_cb = self._make_instrumented_callback(
             self.after, self._on_unredact_progress, "Un-redacting", logger,
             unit_label=self._unredact_progress_unit,
@@ -4313,7 +4346,7 @@ class DocumentRedactorApp(tk.Tk):
                 self.unredact_pdf_path, output_path, key_mapping,
                 progress_callback=progress_cb, phase_callback=phase_cb,
             )
-            units_changed = result.get("pages_changed", result.get("sheets_changed", 0))
+            units_changed = result.get("pages_changed", result.get("sheets_changed", result.get("parts_changed", 0)))
             logger.line(
                 f"Saving to disk: finished -- {result['replacements']} replacement(s) "
                 f"across {units_changed} {self._unredact_progress_unit.replace('row', 'sheet')}(s)"
@@ -4436,7 +4469,11 @@ class DocumentRedactorApp(tk.Tk):
 
     def _finish_unredact_success(self, apply_result, output_path, kind, resolved=None, review_log_path=None):
         resolved = resolved or []
-        if kind == "spreadsheet":
+        if kind == "word":
+            units_changed = apply_result["parts_changed"]
+            unit_word = "part of the document" if units_changed == 1 else "parts of the document (body, headers, footers, notes...)"
+            file_word = "document"
+        elif kind == "spreadsheet":
             units_changed = apply_result["sheets_changed"]
             unit_word = "sheet" if units_changed == 1 else "sheets"
             file_word = "workbook"
@@ -4466,8 +4503,86 @@ class DocumentRedactorApp(tk.Tk):
                 f"never found in the {file_word} ({shown}{more}) -- double check this key "
                 f"file actually belongs to this {file_word}."
             )
+        left = apply_result.get("left_as_placeholders") or {}
+        if left:
+            shown = ", ".join(f"{p} (x{n})" if n > 1 else p for p, n in list(left.items())[:12])
+            more = f" (+{len(left) - 12} more)" if len(left) > 12 else ""
+            msg += (
+                f"\n\n{len(left)} placeholder(s) are still in the document, unchanged -- no loaded "
+                f"key file knows them, or you chose to leave them: {shown}{more}. Load the key "
+                "file they came from and run this again if they should be replaced."
+            )
+        bracketless = apply_result.get("bracketless") or []
+        if bracketless:
+            shown = ", ".join(
+                f'"{b["text"]}"' + (f" (x{b['count']})" if b["count"] > 1 else "") for b in bracketless[:12]
+            )
+            more = f" (+{len(bracketless) - 12} more)" if len(bracketless) > 12 else ""
+            msg += (
+                f"\n\nCheck by hand: the document also mentions {shown}{more} WITHOUT the < > "
+                "brackets -- e.g. text typed or rewritten by hand or by an AI tool. Those were "
+                "NOT changed, because the bare words could be ordinary text. Use Word's "
+                "Find & Replace for any that are placeholders."
+            )
         messagebox.showinfo(APP_TITLE, msg)
         self.unredact_summary_var.set(f"Saved: {output_path}")
+
+    def _ask_word_placeholder_choices(self, needs):
+        """Modal dialog for un-redacting a Word document: one row per
+        placeholder the key file(s) give more than one value for (see
+        word_unredact_engine.placeholders_needing_choice()). Returns
+        {placeholder: chosen value, or None to leave it}, or None if the
+        user cancelled."""
+        leave = "(leave the placeholder as it is)"
+        win = tk.Toplevel(self)
+        win.title(f"{APP_TITLE} -- Choose values")
+        win.geometry("820x520")
+        win.transient(self)
+        tk.Label(
+            win,
+            text="The key file(s) give more than one possible value for the placeholders below "
+                 "-- e.g. the same label was used for two different columns, or two key files "
+                 "spell the same person differently. A Word document has no columns to tell "
+                 "them apart, so pick the right value for each one. Each choice applies to "
+                 "every place that placeholder appears in this document.",
+            wraplength=780, justify="left", anchor="w",
+        ).pack(fill="x", padx=12, pady=(12, 6))
+        outer, inner = self._build_scrollable_frame(win)
+        outer.pack(fill="both", expand=True, padx=12, pady=6)
+
+        rows = []
+        for need in needs:
+            frame = tk.Frame(inner, relief="groove", borderwidth=1)
+            frame.pack(fill="x", pady=4, padx=2)
+            times = f"  (appears {need['count']} times)" if need["count"] > 1 else ""
+            tk.Label(frame, text=f"{need['placeholder']}{times}", font=("TkDefaultFont", 9, "bold"),
+                     anchor="w").pack(fill="x", padx=8, pady=(6, 0))
+            labels = [f"{c['value']}   -- from {c['source']}" for c in need["candidates"]]
+            value_by_label = {lab: c["value"] for lab, c in zip(labels, need["candidates"])}
+            value_by_label[leave] = None
+            var = tk.StringVar(value=labels[0])
+            ttk.Combobox(frame, textvariable=var, values=labels + [leave], state="readonly", width=90).pack(
+                anchor="w", padx=8, pady=(2, 8)
+            )
+            rows.append((need["placeholder"], var, value_by_label))
+
+        result = {"choices": None}
+
+        def on_ok():
+            result["choices"] = {ph: vbl[var.get()] for ph, var, vbl in rows}
+            win.destroy()
+
+        btn_row = tk.Frame(win)
+        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        tk.Button(btn_row, text="Cancel", command=win.destroy).pack(side="right")
+        tk.Button(btn_row, text="Continue", command=on_ok).pack(side="right", padx=(0, 8))
+        try:
+            win.wait_visibility()
+            win.grab_set()
+        except tk.TclError:
+            pass
+        self.wait_window(win)
+        return result["choices"]
 
     # ----------------------------------------------------------------
     # Manual review for un-redaction: shown instead of the hard block when
