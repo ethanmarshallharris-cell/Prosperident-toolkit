@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-13"
+APP_BUILD = "2026-10-13.1"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -4622,6 +4622,8 @@ class DocumentRedactorApp(tk.Tk):
             frame.pack(fill="x", pady=4, padx=2)
 
             loc_text = f"{occ['sheet']}!{occ['coordinate']}   placeholder: {occ['value']}"
+            if occ.get("embedded"):
+                loc_text += "   (inside the cell's text -- only the placeholder is replaced)"
             if occ.get("column_header"):
                 loc_text += f"   -- in column '{occ['column_header']}'"
             tk.Label(frame, text=loc_text, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(
@@ -4676,7 +4678,10 @@ class DocumentRedactorApp(tk.Tk):
             for rv in row_vars:
                 occ = rv["occ"]
                 action = rv["action_var"].get()
-                entry = {"sheet": occ["sheet"], "coordinate": occ["coordinate"], "action": action}
+                entry = {
+                    "sheet": occ["sheet"], "coordinate": occ["coordinate"], "action": action,
+                    "placeholder": occ["value"], "embedded": bool(occ.get("embedded")),
+                }
                 if action == "replace":
                     entry["value"] = rv["value_by_choice"][rv["choice_var"].get()]
                 else:

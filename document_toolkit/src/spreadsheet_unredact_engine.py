@@ -142,6 +142,36 @@ _PLACEHOLDER_SCAN_RE = re.compile(r"<[^<>]+ \d+>")
 # header, which is what un-redaction uses. So these rows are skipped when
 # reading a key. Kept in step with excel_spreadsheet.COMBINED_COLUMN_PREFIX.
 COMBINED_COLUMN_PREFIX = "Combined: "
+_COMBINED_SEPARATOR = " + "
+
+# Reserved key_mapping "column name" holding each combination's WHOLE
+# value, rendered as one name ({placeholder: "John Smith"}), built from
+# those summary rows. Never matched against a header and never used for
+# a cell that sits in one of the combined columns (those get their own
+# part back by header, as before) -- only where a combined placeholder
+# turns up somewhere else: inside a sentence, a heading, or a column that
+# isn't one of the originals, where the person's full name is what
+# belongs. Kept in step with word_unredact_engine.py's rendering.
+_COMBINED_KEY_COLUMN = "(combined columns)"
+
+
+def _render_combined(column: str, encoded: str) -> str:
+    """'Combined: Last Name + First Name', '["Smith", "John"]' -> 'Smith, John'
+    (last-name column first, as Dentrix writes names); otherwise the
+    non-blank parts joined with spaces, e.g. 'John Smith'."""
+    import json
+    parts = column[len(COMBINED_COLUMN_PREFIX):].split(_COMBINED_SEPARATOR)
+    try:
+        values = [str(v) for v in json.loads(encoded)]
+    except (ValueError, TypeError):
+        return encoded
+    present = [v.strip() for v in values if v.strip()]
+    if not present:
+        return ""
+    first_header = parts[0].lower() if parts else ""
+    if len(present) >= 2 and values[0].strip() and ("last" in first_header or "surname" in first_header):
+        return f"{present[0]}, {' '.join(present[1:])}"
+    return " ".join(present)
 
 # Reserved key_mapping "column name" for a flat/generic key's entries (see
 # module docstring) -- guaranteed to never collide with a real column
@@ -260,6 +290,7 @@ def read_key_csv(key_path: str) -> dict:
         if len(row) >= 3:
             column, placeholder, value = row[0], row[1], row[2]
             if column.startswith(COMBINED_COLUMN_PREFIX):
+                mapping.setdefault(_COMBINED_KEY_COLUMN, {})[placeholder] = _render_combined(column, value)
                 continue
             mapping.setdefault(column, {})[placeholder] = value
 
@@ -342,7 +373,7 @@ def _build_placeholder_index(key_mapping: dict) -> dict:
     """
     index = {}
     for column, phmap in key_mapping.items():
-        if column == _GENERIC_KEY_COLUMN:
+        if column == _GENERIC_KEY_COLUMN or column == _COMBINED_KEY_COLUMN:
             continue
         for ph, val in phmap.items():
             index.setdefault(ph, []).append((column, val))
@@ -391,6 +422,69 @@ def _substitute_generic_placeholders(text: str, generic_map: dict):
     return new_text, replaced, found_texts
 
 
+def _resolve_without_header(placeholder, candidates, combined_map, split_layout=False):
+    """The real value for a known placeholder found where no column header
+    says which entry applies (a renamed column, a summary sheet, a
+    sentence, a heading). A combination's whole name first -- unless
+    `split_layout`: the same placeholder fills two or more cells of this
+    row, i.e. this is the redacted workbook's own First/Last layout with a
+    renamed header, where the cell needs one PART, not the whole name;
+    then it is only resolved if all parts agree, else left for a human.
+    Otherwise the value, when every entry for this placeholder agrees on
+    one; otherwise None -- genuinely ambiguous, for a human to pick."""
+    if combined_map and placeholder in combined_map and not split_layout:
+        return combined_map[placeholder]
+    distinct = []
+    for _column, value in candidates or []:
+        if value not in distinct:
+            distinct.append(value)
+    return distinct[0] if len(distinct) == 1 else None
+
+
+def _substitute_embedded_placeholders(text, placeholder_index, combined_map):
+    """Replaces every KNOWN placeholder-shaped substring of `text` -- a
+    placeholder inside a sentence, a heading, a label -- using
+    _resolve_without_header(). This is what lets a workbook that merely
+    QUOTES placeholders (an analysis or summary built from a redacted
+    file, which is never shaped like the redacted file itself) be
+    un-redacted with an ordinary spreadsheet key, the same way the
+    generic pass already did for a PDF name key. Placeholders no loaded
+    key knows are left untouched (the self-check reports them).
+
+    Returns (new_text, replaced_count, found_texts, ambiguous_texts) --
+    ambiguous_texts are known placeholders with more than one possible
+    value, left in place for the manual review."""
+    found, ambiguous = set(), []
+    if "<" not in text:
+        return text, 0, found, ambiguous
+    replaced = 0
+
+    def _sub(match):
+        nonlocal replaced
+        ph = match.group(0)
+        candidates = placeholder_index.get(ph)
+        if candidates is None and ph not in combined_map:
+            return ph
+        found.add(ph)
+        value = _resolve_without_header(ph, candidates, combined_map)
+        if value is None:
+            if ph not in ambiguous:
+                ambiguous.append(ph)
+            return ph
+        replaced += 1
+        return value
+
+    return _PLACEHOLDER_SCAN_RE.sub(_sub, text), replaced, found, ambiguous
+
+
+def _distinct_candidates(candidates):
+    out = []
+    for column, value in candidates or []:
+        if not any(c["value"] == value for c in out):
+            out.append({"column": column, "value": value})
+    return out
+
+
 def apply_unredaction(
     input_path: str,
     output_path: str,
@@ -430,6 +524,7 @@ def apply_unredaction(
 
 def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callback, phase_callback):
     placeholder_index = _build_placeholder_index(key_mapping)
+    combined_map = key_mapping.get(_COMBINED_KEY_COLUMN, {})
     wb = _open_workbook(input_path)
     try:
         sheet_col_map = {}
@@ -476,6 +571,7 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
             changed_this_sheet = False
             for row in ws.iter_rows(min_row=2):
                 current += 1
+                row_values = [str(c.value) for c in row if c.value is not None]
                 for cell in row:
                     if cell.value is None:
                         continue
@@ -496,13 +592,17 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
                         changed_this_sheet = True
                         continue
 
-                    if len(candidates) == 1:
+                    real_value = _resolve_without_header(
+                        val_str, candidates, combined_map, split_layout=row_values.count(val_str) >= 2
+                    )
+                    if real_value is not None:
                         # Fallback: header didn't match (column renamed,
-                        # reordered under an unrecognized label, etc.),
-                        # but this exact placeholder text is unique across
-                        # the whole key file -- safe to resolve regardless
-                        # of which column/sheet it's actually sitting in.
-                        _, real_value = candidates[0]
+                        # reordered under an unrecognized label, a
+                        # different workbook altogether), but this
+                        # placeholder has only one possible value (or is a
+                        # combination, whose whole name belongs here) --
+                        # safe to resolve regardless of which column/sheet
+                        # it's actually sitting in.
                         cell.value = real_value
                         replacements += 1
                         changed_this_sheet = True
@@ -523,7 +623,7 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
                             "value": val_str,
                             "column_header": raw_headers.get(cell.column),
                             "row_context": row_context,
-                            "candidates": [{"column": c, "value": v} for c, v in candidates],
+                            "candidates": _distinct_candidates(candidates),
                         })
                 if progress_callback is not None:
                     try:
@@ -554,6 +654,37 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
                             replacements += count
                             sheets_changed.add(ws.title)
 
+        # Embedded pass -- placeholders the passes above can't reach: inside
+        # longer text, or in row 1 (a heading in a summary workbook). Every
+        # row of every sheet. Cells already queued for manual review above
+        # are skipped so they aren't listed twice.
+        if placeholder_index or combined_map:
+            review_locs = {(a["sheet"], a["coordinate"]) for a in ambiguous}
+            for ws in wb.worksheets:
+                raw_headers = sheet_raw_headers.get(ws.title, {})
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if not isinstance(cell.value, str) or "<" not in cell.value:
+                            continue
+                        if (ws.title, cell.coordinate) in review_locs:
+                            continue
+                        new_val, count, found, unresolved = _substitute_embedded_placeholders(
+                            cell.value, placeholder_index, combined_map
+                        )
+                        seen_placeholder_texts |= found
+                        if count:
+                            cell.value = new_val
+                            replacements += count
+                            sheets_changed.add(ws.title)
+                        for ph in unresolved:
+                            ambiguous.append({
+                                "sheet": ws.title, "coordinate": cell.coordinate, "row": cell.row,
+                                "value": ph, "embedded": True,
+                                "column_header": raw_headers.get(cell.column) if cell.row > 1 else None,
+                                "row_context": [{"label": "Cell text", "value": new_val[:200]}],
+                                "candidates": _distinct_candidates(placeholder_index.get(ph)),
+                            })
+
         if phase_callback is not None:
             try:
                 phase_callback("saving")
@@ -564,6 +695,7 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
         not_found = sorted(
             f"{col if col is not None else '(no column)'}: {ph}"
             for col, phmap in key_mapping.items()
+            if col != _COMBINED_KEY_COLUMN
             for ph in phmap
             if ph not in seen_placeholder_texts
         )
@@ -579,6 +711,7 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
 
 def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callback, phase_callback):
     placeholder_index = _build_placeholder_index(key_mapping)
+    combined_map = key_mapping.get(_COMBINED_KEY_COLUMN, {})
     try:
         with open(input_path, "r", newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
@@ -609,6 +742,7 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
     ambiguous = []
 
     for row_i, row in enumerate(rows[1:], start=2):  # 1-based row numbers; row 1 is the header
+        row_values = list(row)
         for col_i, val in enumerate(row):
             if val == "":
                 continue
@@ -624,8 +758,10 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
                 sheets_changed = True
                 continue
 
-            if len(candidates) == 1:
-                _, real_value = candidates[0]
+            real_value = _resolve_without_header(
+                val, candidates, combined_map, split_layout=row_values.count(val) >= 2
+            )
+            if real_value is not None:
                 row[col_i] = real_value
                 replacements += 1
                 sheets_changed = True
@@ -643,7 +779,7 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
                     "value": val,
                     "column_header": raw_header_by_col_idx.get(col_i),
                     "row_context": row_context,
-                    "candidates": [{"column": c, "value": v} for c, v in candidates],
+                    "candidates": _distinct_candidates(candidates),
                 })
         if progress_callback is not None:
             try:
@@ -670,6 +806,33 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
                     replacements += count
                     sheets_changed = True
 
+    # Embedded pass -- see _apply_unredaction_xlsx's identical pass.
+    if placeholder_index or combined_map:
+        review_locs = {a["coordinate"] for a in ambiguous}
+        for row_i, row in enumerate(rows, start=1):
+            for col_i, val in enumerate(row):
+                if "<" not in val:
+                    continue
+                coordinate = f"{_csv_col_label(col_i)}{row_i}"
+                if coordinate in review_locs:
+                    continue
+                new_val, count, found, unresolved = _substitute_embedded_placeholders(
+                    val, placeholder_index, combined_map
+                )
+                seen_placeholder_texts |= found
+                if count:
+                    row[col_i] = new_val
+                    replacements += count
+                    sheets_changed = True
+                for ph in unresolved:
+                    ambiguous.append({
+                        "sheet": pseudo_sheet, "coordinate": coordinate, "row": row_i,
+                        "value": ph, "embedded": True,
+                        "column_header": raw_header_by_col_idx.get(col_i) if row_i > 1 else None,
+                        "row_context": [{"label": "Cell text", "value": new_val[:200]}],
+                        "candidates": _distinct_candidates(placeholder_index.get(ph)),
+                    })
+
     if phase_callback is not None:
         try:
             phase_callback("saving")
@@ -681,6 +844,7 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
     not_found = sorted(
         f"{col if col is not None else '(no column)'}: {ph}"
         for col, phmap in key_mapping.items()
+        if col != _COMBINED_KEY_COLUMN
         for ph in phmap
         if ph not in seen_placeholder_texts
     )
@@ -707,16 +871,32 @@ def apply_ambiguous_decisions(output_path: str, decisions: "list") -> int:
     letter+row-number convention _csv_col_label() produces). Returns the
     number of cells actually changed.
     """
-    to_replace = {(d["sheet"], d["coordinate"]): d["value"] for d in decisions if d.get("action") == "replace"}
-    if not to_replace:
+    # A decision for a placeholder found INSIDE a cell's text ('embedded':
+    # True, with 'placeholder' naming it) replaces just that placeholder,
+    # keeping the rest of the text; several can apply to one cell.
+    to_replace = {}
+    embedded_ops = {}
+    for d in decisions:
+        if d.get("action") != "replace":
+            continue
+        if d.get("embedded"):
+            embedded_ops.setdefault((d["sheet"], d["coordinate"]), []).append((d["placeholder"], d["value"]))
+        else:
+            to_replace[(d["sheet"], d["coordinate"])] = d["value"]
+    if not to_replace and not embedded_ops:
         return 0
+
+    def _apply_embedded(text, ops):
+        for placeholder, value in ops:
+            text = text.replace(placeholder, value)
+        return text
 
     if _is_csv(output_path):
         with open(output_path, "r", newline="", encoding="utf-8-sig") as f:
             rows = list(csv.reader(f))
         pseudo_sheet = os.path.basename(output_path)
         changed = 0
-        for (sheet, coordinate), value in to_replace.items():
+        for (sheet, coordinate) in set(to_replace) | set(embedded_ops):
             if sheet != pseudo_sheet:
                 continue
             m = _COORD_RE.match(coordinate)
@@ -725,7 +905,11 @@ def apply_ambiguous_decisions(output_path: str, decisions: "list") -> int:
             col_idx = _csv_label_to_idx(m.group(1))
             row_idx = int(m.group(2)) - 1  # coordinate row numbers are 1-based
             if 0 <= row_idx < len(rows) and col_idx < len(rows[row_idx]):
-                rows[row_idx][col_idx] = value
+                key = (sheet, coordinate)
+                if key in to_replace:
+                    rows[row_idx][col_idx] = to_replace[key]
+                else:
+                    rows[row_idx][col_idx] = _apply_embedded(rows[row_idx][col_idx], embedded_ops[key])
                 changed += 1
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerows(rows)
@@ -740,6 +924,9 @@ def apply_ambiguous_decisions(output_path: str, decisions: "list") -> int:
                     key = (ws.title, cell.coordinate)
                     if key in to_replace:
                         cell.value = to_replace[key]
+                        changed += 1
+                    elif key in embedded_ops and cell.value is not None:
+                        cell.value = _apply_embedded(str(cell.value), embedded_ops[key])
                         changed += 1
         wb.save(output_path)
     finally:
