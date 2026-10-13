@@ -86,13 +86,18 @@ nothing to re-trigger.
 
 A typical flow: redact document 1 with nothing loaded, keep its key file.
 Before scanning document 2, click **Use existing key file(s)...** and pick
-document 1's key. Redact document 2 -- its key file now covers both
-documents (for Excel, document 2's key is a strict superset of document
-1's, since every value carried forward is included even if document 2
-didn't happen to contain it; a PDF-style document's key only ever lists
-names actually present in that one file, so for a chain of more than two
-PDFs, pick *every* earlier key file each time, not just the most recent
-one). **Clear** removes every loaded key file and goes back to fresh
+document 1's key. Redact document 2 -- **its key file is now a one-stop
+key**: it contains everything from document 1's key as well as document 2's
+own entries (for a PDF, every earlier patient even if document 2 doesn't
+mention them; for a spreadsheet, every earlier column even if you didn't
+redact it this time). That one key alone un-redacts document 1, document 2,
+and anything built from either -- an analysis workbook or a Word report that
+quotes placeholders from both. Its header says so, listing each document
+it covers on a "Covers:" line, and the completion message lists them too.
+For document 3, load document 2's key and the chain simply keeps growing;
+the Un-redact tab shows what each key you pick covers.
+
+**Clear** removes every loaded key file and goes back to fresh
 numbering.
 
 If two or more of the key files you pick disagree with each other (the

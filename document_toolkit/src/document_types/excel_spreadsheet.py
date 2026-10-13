@@ -123,6 +123,8 @@ from typing import Dict, List
 import openpyxl
 from openpyxl.utils import get_column_letter
 
+from . import _key_lineage
+
 ID = "excel_spreadsheet"
 DISPLAY_NAME = "Excel Spreadsheet (choose columns)"
 FORMAT_KIND = "spreadsheet"
@@ -873,7 +875,7 @@ def _write_key_body(writer, key_rows: List[dict]) -> None:
         writer.writerow([row["column"], row["placeholder"], row["value"]])
 
 
-def write_key(key_path: str, input_path: str, output_path: str, key_rows: List[dict]) -> None:
+def write_key(key_path: str, input_path: str, output_path: str, key_rows: List[dict], carried_from=None) -> None:
     """Writes a CSV recording every (column, placeholder, real value)
     triple, so the redaction can be reversed later via the Un-redact tab
     (spreadsheet_unredact_engine.py). One row per unique value per column.
@@ -884,7 +886,25 @@ def write_key(key_path: str, input_path: str, output_path: str, key_rows: List[d
     whatever party the redaction exists to protect against. That warning
     is written into the first few rows of the file itself, since the CSV
     is what actually travels with the case file.
+
+    `carried_from`: the earlier key file(s) loaded for consistent numbering
+    ("Use existing key file(s)"). Every row of theirs that this redaction
+    didn't already produce is copied in too -- including columns not
+    redacted this time -- so this key ALONE un-redacts this workbook and
+    every document those keys covered (see _key_lineage.py). Their
+    coverage is listed in this key's header.
     """
+    rows = list(key_rows)
+    if carried_from:
+        have = {(r["column"], r["placeholder"]) for r in rows}
+        for path in carried_from:
+            if not _key_lineage.is_spreadsheet_key(path):
+                continue
+            for row in _key_lineage.table_rows(path):
+                if len(row) < 3 or (row[0], row[1]) in have:
+                    continue
+                have.add((row[0], row[1]))
+                rows.append({"column": row[0], "placeholder": row[1], "value": row[2]})
     with open(key_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["CONFIDENTIAL -- Spreadsheet redaction key"])
@@ -894,8 +914,9 @@ def write_key(key_path: str, input_path: str, output_path: str, key_rows: List[d
         writer.writerow([f"Source workbook: {os.path.basename(input_path)}"])
         writer.writerow([f"Redacted workbook: {os.path.basename(output_path)}"])
         writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        _key_lineage.write_coverage_rows(writer, [os.path.basename(input_path)], carried_from)
         writer.writerow([])
-        _write_key_body(writer, key_rows)
+        _write_key_body(writer, rows)
 
 
 def write_key_batch(key_path: str, file_pairs: "list", key_rows: List[dict]) -> None:
@@ -925,6 +946,7 @@ def write_key_batch(key_path: str, file_pairs: "list", key_rows: List[dict]) -> 
         for source_name, redacted_name in file_pairs:
             writer.writerow([f"  Source: {source_name}  ->  Redacted: {redacted_name}"])
         writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        _key_lineage.write_coverage_rows(writer, [src for src, _red in file_pairs])
         writer.writerow([])
         _write_key_body(writer, key_rows)
 

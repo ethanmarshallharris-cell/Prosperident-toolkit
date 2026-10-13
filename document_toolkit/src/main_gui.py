@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-13.1"
+APP_BUILD = "2026-10-13.2"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -1083,6 +1083,31 @@ class DocumentRedactorApp(tk.Tk):
     def _is_spreadsheet_type(doc_type):
         return getattr(doc_type, "FORMAT_KIND", "pdf_report") == "spreadsheet"
 
+    def _carried_key_paths(self, doc_type):
+        """The same-type key file(s) loaded under "Use existing key
+        file(s)" for this redaction -- handed to write_key() so the new key
+        is a one-stop key covering those documents too (see
+        document_types/_key_lineage.py). None when nothing is loaded."""
+        if self.redact_existing_key_paths and self._doc_type_supports_existing_key(doc_type):
+            return list(self.redact_existing_key_paths)
+        return None
+
+    @staticmethod
+    def _key_coverage_note(key_path):
+        """"It covers: A, B" for a key that covers more than one document."""
+        try:
+            covered = document_types._key_lineage.covered_files(key_path)
+        except Exception:  # noqa: BLE001
+            return ""
+        if len(covered) < 2:
+            return ""
+        shown = "\n".join(f"  - {c}" for c in covered[:12])
+        more = f"\n  ... and {len(covered) - 12} more" if len(covered) > 12 else ""
+        return (
+            "\n\nThis is a ONE-STOP key: it alone can un-redact every one of these "
+            f"documents (the earlier key file(s) are no longer needed for that):\n{shown}{more}"
+        )
+
     @staticmethod
     def _doc_type_supports_existing_key(doc_type):
         """Whether this plugin implements the optional pair of hooks that
@@ -1764,7 +1789,10 @@ class DocumentRedactorApp(tk.Tk):
         key_error = None
         if result["ok"] and key_path:
             try:
-                doc_type.write_key(key_path, self.input_path, output_path, included)
+                doc_type.write_key(
+                    key_path, self.input_path, output_path, included,
+                    carried_from=self._carried_key_paths(doc_type),
+                )
                 logger.line("Name key CSV: written")
             except Exception as exc:  # noqa: BLE001
                 key_error = str(exc)
@@ -1885,6 +1913,7 @@ class DocumentRedactorApp(tk.Tk):
                 "That file can reverse every placeholder back to the real value -- keep it "
                 "with your own case file and do not send it along with the redacted file. "
                 "Use the Un-redact tab to reverse it later."
+                + self._key_coverage_note(key_path)
             )
         elif key_error:
             msg += (
@@ -2068,7 +2097,10 @@ class DocumentRedactorApp(tk.Tk):
         key_error = None
         if result["ok"] and key_path:
             try:
-                doc_type.write_key(key_path, self.input_path, output_path, key_rows)
+                doc_type.write_key(
+                    key_path, self.input_path, output_path, key_rows,
+                    carried_from=self._carried_key_paths(doc_type),
+                )
                 logger.line("Redaction key CSV: written")
             except Exception as exc:  # noqa: BLE001
                 key_error = str(exc)
@@ -2185,6 +2217,7 @@ class DocumentRedactorApp(tk.Tk):
                 "That file can reverse every placeholder back to the real value -- keep it "
                 "with your own case file and do not send it along with the redacted file. "
                 "Use the Un-redact tab to reverse it later."
+                + self._key_coverage_note(key_path)
             )
         elif key_error:
             msg += (
@@ -2421,7 +2454,10 @@ class DocumentRedactorApp(tk.Tk):
         key_error = None
         if key_path:
             try:
-                doc_type.write_key(key_path, self.input_path, output_path, key_rows)
+                doc_type.write_key(
+                    key_path, self.input_path, output_path, key_rows,
+                    carried_from=self._carried_key_paths(doc_type),
+                )
             except Exception as exc:  # noqa: BLE001
                 key_error = str(exc)
 
@@ -2728,7 +2764,10 @@ class DocumentRedactorApp(tk.Tk):
         key_error = None
         if key_path:
             try:
-                doc_type.write_key(key_path, self.input_path, output_path, included_plus)
+                doc_type.write_key(
+                    key_path, self.input_path, output_path, included_plus,
+                    carried_from=self._carried_key_paths(doc_type),
+                )
             except Exception as exc:  # noqa: BLE001
                 key_error = str(exc)
 
@@ -4157,10 +4196,22 @@ class DocumentRedactorApp(tk.Tk):
             return
         self.unredact_key_paths = list(paths)
         if len(self.unredact_key_paths) == 1:
-            self.unredact_key_var.set(self.unredact_key_paths[0])
+            label = self.unredact_key_paths[0]
         else:
             names = ", ".join(os.path.basename(p) for p in self.unredact_key_paths)
-            self.unredact_key_var.set(f"{len(self.unredact_key_paths)} files selected: {names}")
+            label = f"{len(self.unredact_key_paths)} files selected: {names}"
+        covered = []
+        for p in self.unredact_key_paths:
+            try:
+                for c in document_types._key_lineage.covered_files(p):
+                    if c not in covered:
+                        covered.append(c)
+            except Exception:  # noqa: BLE001
+                pass
+        if covered:
+            shown = ", ".join(covered[:6]) + (f" (+{len(covered) - 6} more)" if len(covered) > 6 else "")
+            label += f"\n  covers: {shown}"
+        self.unredact_key_var.set(label)
         self._update_unredact_btn_state()
 
     def _update_unredact_btn_state(self):

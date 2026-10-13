@@ -51,6 +51,8 @@ from typing import List, Optional
 
 import fitz  # PyMuPDF
 
+from . import _key_lineage
+
 # --------------------------------------------------------------------
 # Plugin contract metadata -- see document_types/base.py for what each
 # of these means and how the GUI uses them.
@@ -1584,7 +1586,7 @@ def apply_pdf_leak_decisions(
     return synthetic_matches
 
 
-def write_name_key(key_path: str, input_path: str, output_path: str, matches: List[NameMatch]) -> None:
+def write_name_key(key_path: str, input_path: str, output_path: str, matches: List[NameMatch], carried_from=None) -> None:
     """Writes a CSV key mapping each <Patient N> placeholder back to the
     real name it replaced, so the redaction can be reversed later if needed
     (e.g. to re-identify a specific patient's entries during the
@@ -1607,7 +1609,24 @@ def write_name_key(key_path: str, input_path: str, output_path: str, matches: Li
     font/size/color carry no identifying information on their own, so
     including them adds nothing to what this file already needs to be
     kept confidential for.
+
+    `carried_from`: the earlier name key(s) loaded for consistent
+    numbering ("Use existing key file(s)"). Every patient of theirs that
+    doesn't appear in THIS PDF is copied in too (with its recorded
+    style), so this key ALONE un-redacts this PDF and every document those
+    keys covered -- no need to keep collecting every earlier key file.
+    Their coverage is listed in this key's header (see _key_lineage.py).
     """
+    carried_rows = {}
+    for path in carried_from or []:
+        if _key_lineage.is_spreadsheet_key(path):
+            continue
+        for row in _key_lineage.table_rows(path):
+            if len(row) < 2:
+                continue
+            mm = _KEY_PLACEHOLDER_RE.match(row[0].strip())
+            if mm:
+                carried_rows.setdefault(int(mm.group(1)), row)
     with open(key_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["CONFIDENTIAL -- Patient name key"])
@@ -1616,11 +1635,12 @@ def write_name_key(key_path: str, input_path: str, output_path: str, matches: Li
         writer.writerow([f"Source PDF: {os.path.basename(input_path)}"])
         writer.writerow([f"Redacted PDF: {os.path.basename(output_path)}"])
         writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        _key_lineage.write_coverage_rows(writer, [os.path.basename(input_path)], carried_from)
         writer.writerow([])
-        _write_name_key_body(writer, matches)
+        _write_name_key_body(writer, matches, carried_rows)
 
 
-def _write_name_key_body(writer, matches: List[NameMatch]) -> None:
+def _write_name_key_body(writer, matches: List[NameMatch], carried_rows=None) -> None:
     by_patient = {}
     for m in matches:
         # first-seen wins, consistent with the name itself -- for a batch
@@ -1629,8 +1649,15 @@ def _write_name_key_body(writer, matches: List[NameMatch]) -> None:
         by_patient.setdefault(m.patient_no, m)
 
     writer.writerow(["Placeholder", "Real Name", "Font", "Size", "Color", "Flags"])
-    for patient_no in sorted(by_patient):
-        m = by_patient[patient_no]
+    carried_rows = carried_rows or {}
+    for patient_no in sorted(set(by_patient) | set(carried_rows)):
+        m = by_patient.get(patient_no)
+        if m is None:
+            # From an earlier key (see write_name_key()'s carried_from):
+            # same row, placeholder rebuilt with this module's label.
+            row = list(carried_rows[patient_no]) + [""] * 6
+            writer.writerow([f"<{ENTITY_LABEL} {patient_no}>"] + row[1:6])
+            continue
         color_hex = f"#{m.original_color:06x}" if m.original_color is not None else ""
         writer.writerow([
             f"<{ENTITY_LABEL} {patient_no}>",
@@ -1669,6 +1696,7 @@ def write_name_key_batch(key_path: str, file_pairs: "list", matches: List[NameMa
         for source_name, redacted_name in file_pairs:
             writer.writerow([f"  Source: {source_name}  ->  Redacted: {redacted_name}"])
         writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        _key_lineage.write_coverage_rows(writer, [src for src, _red in file_pairs])
         writer.writerow([])
         _write_name_key_body(writer, matches)
 

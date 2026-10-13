@@ -136,7 +136,11 @@ Functions:
       every non-ok result falls back to the original hard block, same as
       before this fields existed.
 
-  write_key(key_path, input_path, output_path, matches) -> None
+  write_key(key_path, input_path, output_path, matches, carried_from=None) -> None
+      carried_from (optional): the earlier same-type key file(s) loaded
+      for consistent numbering. The key written then also contains every
+      entry of theirs, making it a one-stop key for every document they
+      covered -- see document_types/_key_lineage.py.
       Only required if SUPPORTS_KEY_FILE is True. Writes a file that lets
       every placeholder be reversed back to the real value it replaced.
 
