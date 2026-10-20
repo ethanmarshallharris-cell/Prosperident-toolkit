@@ -5,6 +5,7 @@ standalone Windows and macOS apps by GitHub Actions.
 
 - `document_toolkit/` — redact/un-redact identifying info in report PDFs
 - `odsql_tool/` — Open Dental Security Log SQL Generator
+- `pdf_to_excel/` — PDF to Excel: converts column-laid-out PDFs (statements, reports) to Excel, with draggable column-break bars
 - `notebook_exporter/` — Notebook to Word Exporter: a whole case notebook (OneNote on the web, via Microsoft Graph) to one Word document (Windows PowerShell scripts; packaged, not compiled). Its case list, `casecapture-config.json`, names clients and is never committed or published.
 
 ## One-time setup (Ethan)
@@ -76,7 +77,7 @@ standalone Windows and macOS apps by GitHub Actions.
 
 1. Make your code changes.
 2. Bump the version — `APP_BUILD` in `document_toolkit/src/main_gui.py`,
-   or `APP_VERSION` in `odsql_tool/sql_generator_app.py`.
+   or `APP_VERSION` in `odsql_tool/sql_generator_app.py` or `pdf_to_excel/pdf_to_excel_app.py`.
 3. Update `version.json` (see `setting_up_auto_updates.md`) so already-
    installed copies show the in-app update notice.
 4. Commit, then tag and push a new version:
