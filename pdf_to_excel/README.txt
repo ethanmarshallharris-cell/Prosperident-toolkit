@@ -46,8 +46,20 @@ Join wrapped lines to the row above
     description that wraps onto a second line stays one transaction.
     Turn off if blank first cells are legitimate rows of their own.
 
-Skip column headings repeated on later pages
-    The headings row reprinted at the top of every page is kept once.
+Show column headings only once   (Heading lines: 1)
+    When the PDF reprints the column headings at the top of every page,
+    they appear once, at the top of the workbook, instead of on every
+    page. The headings are taken from the first page converted: its first
+    row, or its first 2 or 3 rows if you set "Heading lines" to 2 or 3
+    (headings printed on more than one line). On later pages those rows
+    are removed wherever they appear; capitals, spacing and numbers that
+    change ("Page 1", "Page 2") don't stop the match. The preview shows
+    the headings in green on that first page and, on later pages, how
+    many heading rows were hidden. With "One sheet per page", each sheet
+    still starts with the headings. Untick to keep every repeat.
+    Tip: with "Join wrapped lines" on, a second heading line whose first
+    column is blank is joined onto the first, so Heading lines = 1 is
+    usually right; with it off, count each printed heading line.
 
 Convert amounts to numbers
     1,234.56  $1,234.56  (45.00)  45.00-  45.00 DR  become numbers

@@ -31,9 +31,17 @@ OPTIONS (Options dataclass)
                     onto a second line in a bank statement); its cells are
                     appended to that row's cells. Off when every row should
                     stay its own row.
-  skip_repeated_header -- after the first page, a row identical to the
-                    first row of the whole extraction (the column headings
-                    reprinted on every page) is dropped.
+  skip_repeated_header -- show the column headings only ONCE. The first
+                    `heading_rows` rows of the first converted page are
+                    taken as the headings (1 normally; 2 or 3 when the
+                    headings are printed on more than one line). On every
+                    later page, any row matching one of those heading rows
+                    is removed -- wherever it appears on the page. Matching
+                    ignores capitals, extra spaces and the actual digits
+                    (so "Page 1" matches "Page 2" and a "Balance as of
+                    09/30" heading still matches "Balance as of 10/31").
+                    One sheet per page: each sheet still starts with the
+                    headings, so every sheet stays readable on its own.
   convert_numbers -- "1,234.56", "$1,234.56", "(45.00)", "45.00-", "-45"
                     become numbers (negative where shown so). Anything that
                     could be an identifier is left as text: leading zeros
@@ -107,6 +115,7 @@ class Options:
     join_wrapped: bool = True
     skip_repeated_header: bool = True
     convert_numbers: bool = True
+    heading_rows: int = 1
 
 
 @dataclass
@@ -136,6 +145,7 @@ class Layout:
         if not isinstance(data, dict) or "breaks" not in data:
             raise ValueError("This is not a PDF to Excel layout file.")
         opts = Options(**{k: v for k, v in (data.get("options") or {}).items() if k in Options.__dataclass_fields__})
+        opts.heading_rows = max(1, min(int(opts.heading_rows or 1), 10))
         return cls(
             breaks=sorted(float(b) for b in data.get("breaks", [])),
             area=Area(**(data.get("area") or {})),
@@ -232,17 +242,39 @@ def join_wrapped_rows(rows: List[List[str]]) -> List[List[str]]:
     return out
 
 
+def _heading_key(row):
+    return tuple(re.sub(r"\d+", "#", re.sub(r"\s+", " ", c.strip().lower())) for c in row)
+
+
+def find_headings(doc, layout: Layout, pages: List[int]) -> List[List[str]]:
+    """The heading rows: the first `heading_rows` rows of the first page in
+    `pages` that has any text in its table area. [] if none."""
+    count = max(1, int(layout.options.heading_rows or 1))
+    for i in pages:
+        rows = page_rows(doc[i], layout, i)
+        if rows:
+            return [list(r) for r in rows[:count]]
+    return []
+
+
+def strip_headings(rows: List[List[str]], headings: List[List[str]]) -> List[List[str]]:
+    """`rows` without any row matching one of `headings`."""
+    keys = {_heading_key(h) for h in headings}
+    return [r for r in rows if _heading_key(r) not in keys]
+
+
 def extract(doc, layout: Layout, pages: List[int], progress=None) -> Dict[int, List[List[str]]]:
     """{page_index: rows} for the given pages, with every option applied."""
     result = {}
-    header = None
+    headings = None
     for n, i in enumerate(pages, 1):
         rows = page_rows(doc[i], layout, i)
         if layout.options.skip_repeated_header:
-            if header is None and rows:
-                header = [c.strip() for c in rows[0]]
-            elif header is not None:
-                rows = [r for r in rows if [c.strip() for c in r] != header]
+            if headings is None:
+                if rows:
+                    headings = rows[:max(1, int(layout.options.heading_rows or 1))]
+            else:
+                rows = strip_headings(rows, headings)
         result[i] = rows
         if progress:
             progress(n, len(pages))
@@ -333,10 +365,14 @@ def to_number(text: str):
 # Writing Excel
 # --------------------------------------------------------------------------
 def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options: Options,
-                   one_sheet: bool = True, page_column: bool = True, source_name: str = ""):
+                   one_sheet: bool = True, page_column: bool = True, source_name: str = "",
+                   headings: List[List[str]] = None):
     """Saves the extraction as .xlsx. One sheet with every page (optionally
-    a "Page" column first) or one sheet per page. Returns the number of
-    rows written."""
+    a "Page" column first) or one sheet per page. `headings` (from
+    find_headings, when headings are shown once): on one sheet their Page
+    cell reads "Page"; with one sheet per page, each sheet starts with
+    them. Returns the number of rows written."""
+    keys = {_heading_key(h) for h in (headings or [])}
     import openpyxl
     from openpyxl.styles import Font
     from openpyxl.utils import get_column_letter
@@ -359,14 +395,24 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
     if one_sheet:
         for i in sorted(rows_by_page):
             for r in rows_by_page[i]:
-                put(ws, r, (i + 1) if page_column else None)
+                if page_column:
+                    if keys and _heading_key(r) in keys:
+                        ws.append(["Page"] + [v for v in r])
+                    else:
+                        put(ws, r, i + 1)
+                else:
+                    put(ws, r)
                 total += 1
         sheets.append(ws)
     else:
         wb.remove(ws)
         for i in sorted(rows_by_page):
             s = wb.create_sheet(f"Page {i + 1}")
-            for r in rows_by_page[i]:
+            page_rows_ = rows_by_page[i]
+            if keys and not (page_rows_ and _heading_key(page_rows_[0]) in keys):
+                for h in headings:
+                    s.append(list(h))
+            for r in page_rows_:
                 put(s, r)
                 total += 1
             sheets.append(s)
@@ -381,9 +427,10 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
                     widths[c.column] = max(widths.get(c.column, 0), len(str(c.value)))
         for col, w in widths.items():
             s.column_dimensions[get_column_letter(col)].width = min(max(w + 2, 6), 60)
-        s.freeze_panes = "A2" if s.max_row > 1 else None
-        if s.max_row >= 1:
-            for c in s[1]:
+        hn = len(headings) if headings else 1
+        s.freeze_panes = f"A{hn + 1}" if s.max_row > hn else None
+        for rn in range(1, min(hn, s.max_row) + 1):
+            for c in s[rn]:
                 c.font = Font(bold=True)
     info = wb.create_sheet("About")
     info.append(["Converted from", source_name])

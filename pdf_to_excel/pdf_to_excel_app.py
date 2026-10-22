@@ -41,7 +41,7 @@ import branding
 import update_check
 import pdf_table_engine as eng
 
-APP_VERSION = "2026-10-20"
+APP_VERSION = "2026-10-22"
 TOOL_KEY = "pdf_to_excel"
 APP_TITLE = "PDF to Excel"
 
@@ -117,10 +117,12 @@ class App(tk.Tk):
         self.own_area_var = tk.BooleanVar(value=False)
         self.join_var = tk.BooleanVar(value=True)
         self.header_var = tk.BooleanVar(value=True)
+        self.heading_rows_var = tk.StringVar(value="1")
         self.numbers_var = tk.BooleanVar(value=True)
         self.sheet_var = tk.StringVar(value="one")
         self.pagecol_var = tk.BooleanVar(value=True)
         self.range_var = tk.StringVar(value="")
+        self.range_var.trace_add("write", lambda *a: self.schedule_preview(300) if self.doc else None)
         self.status_var = tk.StringVar(value="Open a PDF to begin.")
         self.app_update_var = tk.StringVar(value="")
 
@@ -212,8 +214,15 @@ class App(tk.Tk):
         opts.pack(side="top", fill="x")
         ttk.Checkbutton(opts, text="Join wrapped lines to the row above",
                         variable=self.join_var, command=self._options_changed).pack(anchor="w")
-        ttk.Checkbutton(opts, text="Skip column headings repeated on later pages",
-                        variable=self.header_var, command=self._options_changed).pack(anchor="w")
+        hr = ttk.Frame(opts); hr.pack(fill="x")
+        ttk.Checkbutton(hr, text="Show column headings only once",
+                        variable=self.header_var, command=self._options_changed).pack(side="left")
+        ttk.Label(hr, text="   Heading lines:").pack(side="left")
+        self.heading_spin = ttk.Spinbox(hr, from_=1, to=10, width=3, textvariable=self.heading_rows_var,
+                                        command=self._options_changed)
+        self.heading_spin.pack(side="left", padx=(4, 0))
+        self.heading_spin.bind("<KeyRelease>", lambda e: self._options_changed())
+        self.heading_spin.bind("<FocusOut>", lambda e: self._options_changed())
         ttk.Checkbutton(opts, text="Convert amounts to numbers, e.g. (45.00) = -45",
                         variable=self.numbers_var, command=self._options_changed).pack(anchor="w")
         self.own_area_chk = ttk.Checkbutton(opts, text="This page has its own table top/bottom",
@@ -234,7 +243,7 @@ class App(tk.Tk):
         ph.grid(row=1, column=0, sticky="ew")
         prev.rowconfigure(0, weight=1)
         prev.columnconfigure(0, weight=1)
-        self.preview_note = ttk.Label(prev, text="", foreground=branding.GRAY)
+        self.preview_note = ttk.Label(prev, text="", foreground=branding.GRAY, wraplength=420, justify="left")
         self.preview_note.grid(row=2, column=0, columnspan=2, sticky="w")
 
         c = self.canvas
@@ -616,6 +625,11 @@ class App(tk.Tk):
         o.join_wrapped = self.join_var.get()
         o.skip_repeated_header = self.header_var.get()
         o.convert_numbers = self.numbers_var.get()
+        try:
+            o.heading_rows = max(1, min(int(self.heading_rows_var.get()), 10))
+        except ValueError:
+            pass  # half-typed; keep the last good value
+        self.heading_spin.configure(state="normal" if o.skip_repeated_header else "disabled")
         self.schedule_preview(0)
 
     def _sync_option_vars(self):
@@ -623,6 +637,8 @@ class App(tk.Tk):
         self.join_var.set(o.join_wrapped)
         self.header_var.set(o.skip_repeated_header)
         self.numbers_var.set(o.convert_numbers)
+        self.heading_rows_var.set(str(o.heading_rows))
+        self.heading_spin.configure(state="normal" if o.skip_repeated_header else "disabled")
 
     def save_layout(self):
         path = filedialog.asksaveasfilename(title="Save layout", defaultextension=".pdflayout.json",
@@ -666,12 +682,30 @@ class App(tk.Tk):
             self.after_cancel(self._preview_job)
         self._preview_job = self.after(delay, self.update_preview)
 
+    def _range_pages(self):
+        try:
+            return eng.parse_page_range(self.range_var.get(), self.doc.page_count)
+        except ValueError:
+            return list(range(self.doc.page_count))
+
     def update_preview(self):
         self._preview_job = None
         if not self.doc:
             return
+        hidden = 0
+        n_head = 0
         try:
             rows = eng.page_rows(self.doc[self.page_index], self.layout, self.page_index)
+            if self.layout.options.skip_repeated_header and rows:
+                pages = self._range_pages()
+                first = next((i for i in pages if eng.page_rows(self.doc[i], self.layout, i)), None)
+                headings = eng.find_headings(self.doc, self.layout, pages)
+                if self.page_index == first:
+                    n_head = len(headings)
+                elif headings and self.page_index in pages and (first is None or self.page_index > first):
+                    kept = eng.strip_headings(rows, headings)
+                    hidden = len(rows) - len(kept)
+                    rows = kept
         except Exception:
             log.exception("preview")
             rows = []
@@ -694,9 +728,16 @@ class App(tk.Tk):
                     vals.append(v if n is None else f"{n:,}" if isinstance(n, int) else f"{n:,.2f}")
                 else:
                     vals.append(v)
-            self.tree.insert("", "end", values=vals)
+            k = len(self.tree.get_children())
+            self.tree.insert("", "end", values=vals, tags=("heading",) if k < n_head else ())
+        self.tree.tag_configure("heading", background="#e3f1d8", font=("Segoe UI", 9, "bold"))
         more = f"  (first 500 shown)" if len(rows) > 500 else ""
-        self.preview_note.configure(text=f"{len(rows)} row(s) x {ncols} column(s) on this page{more}")
+        note = f"{len(rows)} row(s) x {ncols} column(s) on this page{more}"
+        if n_head:
+            note += ".  Green = headings (kept once)"
+        if hidden:
+            note += f".  {hidden} repeated heading row(s) hidden"
+        self.preview_note.configure(text=note)
 
     # ------------------------------------------------------------------
     # Convert
@@ -729,12 +770,14 @@ class App(tk.Tk):
 
         try:
             rows = eng.extract(self.doc, self.layout, pages, progress)
+            headings = eng.find_headings(self.doc, self.layout, pages) if self.layout.options.skip_repeated_header else None
             self.status_var.set("Writing the workbook...")
             self.update_idletasks()
             n = eng.write_workbook(out, rows, self.layout.options,
                                    one_sheet=self.sheet_var.get() == "one",
                                    page_column=self.pagecol_var.get(),
-                                   source_name=Path(self.pdf_path).name)
+                                   source_name=Path(self.pdf_path).name,
+                                   headings=headings)
         except PermissionError:
             messagebox.showerror(APP_TITLE, f"Couldn't save to\n{out}\n\nIs it open in Excel? Close it and try again.")
             self.status_var.set("Not saved.")
