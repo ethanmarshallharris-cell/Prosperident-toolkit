@@ -88,10 +88,14 @@ problem that motivated the whole-page-rebuild strategy used elsewhere.
 --------------------------------------------------------------------------
 KNOWN LIMITATIONS
 --------------------------------------------------------------------------
-- Only modern Excel (.xlsx) workbooks are supported -- not the legacy
-  .xls binary format, and not .csv (a .csv has no concept of multiple
-  named sheets or the header-row detection this plugin relies on; it
-  could be supported as a separate, simpler plugin later if needed).
+- Modern Excel (.xlsx) workbooks and .csv files are supported -- not the
+  legacy .xls binary format. A .csv (added October 2026) is read through
+  csv_table.py as a one-sheet workbook (sheet name "CSV"), so everything
+  above -- choosing and combining columns, numbering, keys, one-stop keys,
+  verification, batch redaction -- works on it unchanged. Every CSV value
+  stays text exactly as written (no "00123" -> 123), and the redacted
+  .csv is written back in the original's encoding, delimiter, quoting and
+  line endings. A .csv is always saved as .csv.
 - Only row 1 of each sheet is checked for headers. A workbook whose
   tables don't start at row 1 (title rows, merged banner cells, etc.
   above the real header) won't have its columns detected -- there is no
@@ -124,11 +128,17 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from . import _key_lineage
+import csv_table
 
 ID = "excel_spreadsheet"
-DISPLAY_NAME = "Excel Spreadsheet (choose columns)"
+DISPLAY_NAME = "Excel or CSV Spreadsheet (choose columns)"
 FORMAT_KIND = "spreadsheet"
-FILE_TYPES = [("Excel files", "*.xlsx"), ("All files", "*.*")]
+FILE_TYPES = [
+    ("Excel or CSV files", "*.xlsx *.csv"),
+    ("Excel files", "*.xlsx"),
+    ("CSV files", "*.csv"),
+    ("All files", "*.*"),
+]
 SUPPORTS_KEY_FILE = True
 PROGRESS_UNIT_LABEL = "row"
 # See base.py's "BATCH REDACTION" section and apply_column_redaction()'s
@@ -282,6 +292,8 @@ def _open_workbook(path: str, **kwargs):
     this re-raises with the original exception type/message preserved
     (via `raise ... from exc`) rather than trying to interpret it.
     """
+    if csv_table.is_csv(path):
+        return csv_table.load_as_workbook(path)
     try:
         return openpyxl.load_workbook(path, **kwargs)
     except Exception as exc:
@@ -616,7 +628,7 @@ def apply_column_redaction(
                 phase_callback("saving")
             except Exception:
                 pass
-        wb.save(output_path)
+        csv_table.save_workbook(wb, output_path)
 
         key_rows = []
         for col_name, col_map in placeholder_maps.items():
@@ -675,7 +687,7 @@ def _scan_output_for_leaks_and_shape(output_path: str, placeholders_by_value: "D
     real_values = set(placeholders_by_value)
     leaks = []
     out_shape = {}
-    wb_out = openpyxl.load_workbook(output_path, read_only=True, data_only=True)
+    wb_out = _open_workbook(output_path, read_only=True, data_only=True)
     try:
         for ws in wb_out.worksheets:
             out_shape[ws.title] = (ws.max_row, ws.max_column)
@@ -781,7 +793,7 @@ def verify_column_redaction(input_path: str, output_path: str, selected_columns:
         )
 
     try:
-        wb_in = openpyxl.load_workbook(input_path, read_only=True, data_only=True)
+        wb_in = _open_workbook(input_path, read_only=True, data_only=True)
         in_shape = {ws.title: (ws.max_row, ws.max_column) for ws in wb_in.worksheets}
         wb_in.close()
     except Exception as exc:  # noqa: BLE001
@@ -863,7 +875,7 @@ def apply_leak_decisions(output_path: str, decisions: List[dict]) -> int:
                     if key in to_replace:
                         cell.value = to_replace[key]
                         changed += 1
-        wb.save(output_path)
+        csv_table.save_workbook(wb, output_path)
     finally:
         wb.close()
     return changed

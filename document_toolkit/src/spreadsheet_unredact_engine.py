@@ -117,6 +117,8 @@ import re
 import openpyxl
 from openpyxl.utils import get_column_letter
 
+import csv_table  # reads/writes a .csv in its own dialect (encoding, delimiter, quoting)
+
 # Used for the exact-whole-cell-match path (structured, column-keyed
 # entries) -- placeholders are matched by exact-value lookup against the
 # key file's placeholder set there, not by regex, since (unlike the PDF
@@ -227,7 +229,7 @@ def _csv_label_to_idx(label: str) -> int:
 
 
 def _is_csv(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() == ".csv"
+    return csv_table.is_csv(path)
 
 
 def _try_parse_flat_key_rows(rows: list) -> dict:
@@ -712,11 +714,7 @@ def _apply_unredaction_xlsx(input_path, output_path, key_mapping, progress_callb
 def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callback, phase_callback):
     placeholder_index = _build_placeholder_index(key_mapping)
     combined_map = key_mapping.get(_COMBINED_KEY_COLUMN, {})
-    try:
-        with open(input_path, "r", newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.reader(f))
-    except OSError as exc:
-        raise RuntimeError(f"Could not read this CSV file: {exc}") from exc
+    rows, csv_format = csv_table.read_csv(input_path)
     if not rows:
         raise RuntimeError("This CSV file is empty -- nothing to un-redact.")
 
@@ -838,8 +836,7 @@ def _apply_unredaction_csv(input_path, output_path, key_mapping, progress_callba
             phase_callback("saving")
         except Exception:
             pass
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerows(rows)
+    csv_table.write_csv(output_path, rows, csv_format)
 
     not_found = sorted(
         f"{col if col is not None else '(no column)'}: {ph}"
@@ -892,8 +889,7 @@ def apply_ambiguous_decisions(output_path: str, decisions: "list") -> int:
         return text
 
     if _is_csv(output_path):
-        with open(output_path, "r", newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.reader(f))
+        rows, csv_format = csv_table.read_csv(output_path)
         pseudo_sheet = os.path.basename(output_path)
         changed = 0
         for (sheet, coordinate) in set(to_replace) | set(embedded_ops):
@@ -911,8 +907,7 @@ def apply_ambiguous_decisions(output_path: str, decisions: "list") -> int:
                 else:
                     rows[row_idx][col_idx] = _apply_embedded(rows[row_idx][col_idx], embedded_ops[key])
                 changed += 1
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(rows)
+        csv_table.write_csv(output_path, rows, csv_format)
         return changed
 
     changed = 0
@@ -994,12 +989,11 @@ def verify_unredaction(output_path: str, key_mapping: dict) -> dict:
             })
 
     if _is_csv(output_path):
-        with open(output_path, "r", newline="", encoding="utf-8-sig") as f:
-            pseudo_sheet = os.path.basename(output_path)
-            for row_i, row in enumerate(csv.reader(f), start=1):
-                for col_i, val in enumerate(row):
-                    if val:
-                        _flag(pseudo_sheet, f"{_csv_col_label(col_i)}{row_i}", val)
+        pseudo_sheet = os.path.basename(output_path)
+        for row_i, row in enumerate(csv_table.read_csv(output_path)[0], start=1):
+            for col_i, val in enumerate(row):
+                if val:
+                    _flag(pseudo_sheet, f"{_csv_col_label(col_i)}{row_i}", val)
     else:
         wb = openpyxl.load_workbook(output_path, read_only=True, data_only=True)
         try:

@@ -9,9 +9,25 @@ itself. Two document types exist today:
 
 - **Dentrix Audit Trail Report** -- scans a PDF for patient names inside
   audit trail entries and redacts them.
-- **Excel Spreadsheet (choose columns)** -- lets you pick which column(s)
-  of an .xlsx workbook to redact, rather than auto-detecting matches (see
-  below -- this one works differently from the PDF type, by design).
+- **Excel or CSV Spreadsheet (choose columns)** -- lets you pick which
+  column(s) of an .xlsx workbook or a .csv file to redact, rather than
+  auto-detecting matches (see below -- this one works differently from the
+  PDF type, by design).
+
+## CSV files (added October 2026)
+
+A .csv file is redacted exactly like an Excel workbook: Load Columns lists
+the columns from its first row; choose, label and combine columns; use
+earlier keys for consistent (one-stop) numbering; Batch Redact can mix
+.xlsx and .csv files with shared numbering; and the Un-redact tab restores
+it with the key. The redacted file is saved as a .csv (`..._REDACTED.csv`),
+in the same encoding (UTF-8 with or without byte-order mark, UTF-16 or
+Windows-1252), delimiter (comma, semicolon, tab or pipe), quoting and line
+endings as the original, so only the redacted cells differ. Every value
+stays text exactly as written -- "00123" stays "00123", dates keep their
+format -- nothing is converted the way opening a .csv in Excel would. In
+the self-check and review screens a .csv's cells are addressed as sheet
+"CSV" (e.g. CSV!B7). Reading and writing is in `src/csv_table.py`.
 
 ## What it does, and how
 
@@ -31,8 +47,8 @@ anything is written to disk, the tool re-opens its own output and
 independently re-checks it; if that check doesn't pass, the tool deletes
 the output and refuses to report success.
 
-**Redact tab, Excel Spreadsheet (choose columns).** Pick that document
-type, browse to the source .xlsx workbook, and click **Load Columns**
+**Redact tab, Excel or CSV Spreadsheet (choose columns).** Pick that
+document type, browse to the source .xlsx workbook or .csv file, and click **Load Columns**
 (this replaces "Scan" for this document type -- there's nothing to
 auto-detect, since you choose the columns yourself). Every column header
 found in row 1 of any sheet is listed with a checkbox, a sample value, and
@@ -562,8 +578,8 @@ needed on the machine that runs it.
 **To redact an Excel workbook:**
 
 1. Open `DocumentRedactor.exe`, and stay on the **Redact** tab.
-2. Choose **"Excel Spreadsheet (choose columns)"** from the dropdown.
-3. **Browse...** and select the source .xlsx workbook.
+2. Choose **"Excel or CSV Spreadsheet (choose columns)"** from the dropdown.
+3. **Browse...** and select the source .xlsx workbook or .csv file.
 4. Click **Load Columns**. Every column header found (across every sheet)
    is listed with a checkbox, a sample value, and a placeholder label you
    can edit.

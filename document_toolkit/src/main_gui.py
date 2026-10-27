@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-13.2"
+APP_BUILD = "2026-10-27"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -1969,15 +1969,18 @@ class DocumentRedactorApp(tk.Tk):
             messagebox.showerror(APP_TITLE, cross_error)
             return
 
-        base = os.path.splitext(os.path.basename(self.input_path))[0]
-        default_name = f"{base}_REDACTED.xlsx"
+        base, in_ext = os.path.splitext(os.path.basename(self.input_path))
+        # A .csv is redacted to a .csv (same encoding, delimiter and
+        # quoting -- see csv_table.py); a workbook to .xlsx.
+        out_ext = ".csv" if in_ext.lower() in (".csv", ".tsv") else ".xlsx"
+        default_name = f"{base}_REDACTED{out_ext}"
         default_dir = os.path.dirname(self.input_path)
         output_path = filedialog.asksaveasfilename(
-            title="Save redacted workbook as...",
+            title="Save redacted file as..." if out_ext == ".csv" else "Save redacted workbook as...",
             initialdir=default_dir,
             initialfile=default_name,
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")],
+            defaultextension=out_ext,
+            filetypes=[("CSV files", "*.csv")] if out_ext == ".csv" else [("Excel files", "*.xlsx")],
         )
         if not output_path:
             return
@@ -3312,7 +3315,7 @@ class DocumentRedactorApp(tk.Tk):
                 pattern = pattern.lower()
                 if pattern == "*.*":
                     continue
-                exts.update(p.strip() for p in pattern.split(";"))
+                exts.update(p.strip() for p in pattern.replace(";", " ").split())
             if f"*{ext}" in exts:
                 matches.append(dt)
         return matches[0] if len(matches) == 1 else None
