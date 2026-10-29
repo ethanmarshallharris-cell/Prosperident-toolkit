@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-27"
+APP_BUILD = "2026-10-29"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -419,6 +419,28 @@ FAILURE_TROUBLESHOOTING = (
 )
 
 
+def _full_name_summary_text(summary, limit=8):
+    """The redaction summary's lines about full-name columns (see
+    excel_spreadsheet.py "FULL-NAME COLUMNS") -- what matched, what was
+    new, and every approximate / uncertain match to check by hand."""
+    out = ""
+    for col, r in (summary.get("full_name_columns") or {}).items():
+        out += (f"\n\nFull-name column '{col}': {r['matched']} person(s) matched an existing "
+                f"number, {r['new']} new person(s) numbered.")
+        for title, items, note in (
+            ("Approximate matches -- please check", r["approximate"], ""),
+            ("Uncertain (more than one person could fit) -- given a NEW number of their own",
+             r["ambiguous"], ""),
+            ("Spelled differently from the first time this person appears -- same number, but "
+             "un-redaction restores the first spelling", r["variants"], ""),
+        ):
+            if items:
+                shown = "\n".join(f"   {a}  ->  {b}" for a, b in items[:limit])
+                more = f"\n   ... and {len(items) - limit} more" if len(items) > limit else ""
+                out += f"\n{title}:\n{shown}{more}{note}"
+    return out
+
+
 class _CombinedColumnsSection:
     """The "Combine columns into one placeholder" panel, shared by the
     Redact tab and the Batch Redact tab so the two never drift apart.
@@ -434,14 +456,22 @@ class _CombinedColumnsSection:
 
     _NONE = "(none)"
 
-    def __init__(self, app, parent, on_change=None):
+    def __init__(self, app, parent, on_change=None, combo_source=None):
         self.app = app
         self.on_change = on_change
+        # combo_source(): combinations known from loaded key files, as
+        # [{"name", "parts", "label"}] -- what a full-name column can be
+        # numbered against besides the combinations defined here.
+        self.combo_source = combo_source
         self.frame = ttk.LabelFrame(parent, text="Combine columns into one placeholder")
         top = ttk.Frame(self.frame)
         top.pack(fill="x", padx=6, pady=(6, 2))
         self.add_btn = ttk.Button(top, text="Combine Columns...", command=self._open_dialog, state="disabled")
         self.add_btn.pack(side="left")
+        self.fullname_btn = ttk.Button(
+            top, text="Full-Name Column...", command=self._open_fullname_dialog, state="disabled"
+        )
+        self.fullname_btn.pack(side="left", padx=(6, 0))
         ttk.Label(
             top,
             text="  e.g. First Name + Last Name redacted together as <Name 1>, <Name 2>, ... -- one "
@@ -451,6 +481,7 @@ class _CombinedColumnsSection:
         self.list_frame = ttk.Frame(self.frame)
         self.list_frame.pack(fill="x", padx=6, pady=(0, 6))
         self.groups = []          # [{"parts", "label", "link", "frame"}, ...]
+        self.fullnames = []       # [{"column", "combined", "parts", "first", "last", "format", "label", "frame"}]
         self.columns = []
         self.row_vars = {}
         self.entity_labels = []
@@ -463,21 +494,24 @@ class _CombinedColumnsSection:
         self.row_vars = row_vars
         self.entity_labels = list(entity_labels or [])
         self.add_btn.configure(state="normal" if len(self.columns) >= 2 else "disabled")
+        self.fullname_btn.configure(state="normal" if self.columns else "disabled")
 
     def clear(self):
-        for g in self.groups:
+        for g in self.groups + self.fullnames:
             try:
                 g["frame"].destroy()
             except tk.TclError:
                 pass
         self.groups = []
+        self.fullnames = []
         self.columns = []
         self.row_vars = {}
         self.add_btn.configure(state="disabled")
+        self.fullname_btn.configure(state="disabled")
         self._changed()
 
     def used_columns(self):
-        return {p for g in self.groups for p in g["parts"]}
+        return {p for g in self.groups for p in g["parts"]} | {f["column"] for f in self.fullnames}
 
     def selections(self):
         """selected_columns entries for every combination (see
@@ -491,7 +525,158 @@ class _CombinedColumnsSection:
                 "shared_identity_label": g["link"],
             }
             for g in self.groups
+        ] + [
+            {
+                "name": f["column"],
+                "label": f["label"],
+                "full_name": {
+                    "combined": f["combined"], "parts": list(f["parts"]),
+                    "first": f["first"], "last": f["last"], "format": f["format"],
+                },
+            }
+            for f in self.fullnames
         ]
+
+    def known_combinations(self):
+        """Every combination a full-name column can be numbered against:
+        those defined here, then those found in loaded key files."""
+        xs = document_types.excel_spreadsheet
+        combos, seen = [], set()
+        for g in self.groups:
+            name = xs.combined_column_name(g["parts"])
+            if name not in seen:
+                seen.add(name)
+                combos.append({"name": name, "parts": list(g["parts"]), "label": g["label"],
+                               "source": "combined here"})
+        if self.combo_source is not None:
+            try:
+                extra = self.combo_source() or []
+            except Exception:  # noqa: BLE001
+                extra = []
+            for c in extra:
+                if c["name"] not in seen:
+                    seen.add(c["name"])
+                    combos.append(dict(c, source="from loaded key file"))
+        return combos
+
+    def _add_fullname(self, column, combo, first, last, fmt):
+        xs = document_types.excel_spreadsheet
+        row = ttk.Frame(self.list_frame)
+        row.pack(fill="x", pady=2)
+        short = xs.NAME_FORMATS[fmt].split("  (")[0]
+        text = (f"{column}  (written {short})   ->   same <{combo['label']} N> numbers as "
+                f"{' + '.join(combo['parts'])}")
+        ttk.Label(row, text=text, anchor="w").pack(side="left", padx=(4, 10))
+        entry = {"column": column, "combined": combo["name"], "parts": list(combo["parts"]),
+                 "first": first, "last": last, "format": fmt, "label": combo["label"], "frame": row}
+        ttk.Button(row, text="Remove", command=lambda e=entry: self._remove_fullname(e)).pack(side="left")
+        self.fullnames.append(entry)
+        self._set_rows_enabled([column], False)
+        self._changed()
+
+    def _remove_fullname(self, entry):
+        if entry in self.fullnames:
+            self.fullnames.remove(entry)
+        entry["frame"].destroy()
+        self._set_rows_enabled([entry["column"]], True)
+        self._changed()
+
+    def _open_fullname_dialog(self):
+        xs = document_types.excel_spreadsheet
+        used = self.used_columns()
+        available = [c for c in self.columns if c not in used]
+        combos = self.known_combinations()
+        if not available:
+            messagebox.showinfo(APP_TITLE, "Every column is already in use.", parent=self.app)
+            return
+        if not combos:
+            messagebox.showinfo(
+                APP_TITLE,
+                "A full-name column is numbered the same as a First Name + Last Name combination, "
+                "and there is none to match yet.\n\nLoad the key file from the earlier redaction "
+                "(\"Use existing key file(s) for consistent numbering\"), or combine this file's own "
+                "first and last name columns with Combine Columns..., then try again.",
+                parent=self.app,
+            )
+            return
+        dlg = tk.Toplevel(self.app)
+        dlg.title("Full-name column")
+        dlg.transient(self.app)
+        dlg.resizable(False, False)
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="For a column holding the whole name in one cell (e.g. \"Smith, John\"). Each name "
+                 "gets the SAME number the person already has in the First Name + Last Name "
+                 "combination, so this file can be compared with the others.",
+            wraplength=480, justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        def best_guess(cols):
+            for c in cols:
+                if "name" in c.lower() or "patient" in c.lower():
+                    return c
+            return cols[0]
+        col_var = tk.StringVar(value=best_guess(available))
+        fmt_labels = list(xs.NAME_FORMATS.values())
+        fmt_keys = list(xs.NAME_FORMATS)
+        fmt_var = tk.StringVar(value=fmt_labels[0])
+        combo_labels = [f"{' + '.join(c['parts'])}  ->  <{c['label']} N>  ({c['source']})" for c in combos]
+        combo_var = tk.StringVar(value=combo_labels[0])
+        first_var, last_var = tk.StringVar(), tk.StringVar()
+
+        rows = [("Full-name column:", ttk.Combobox(body, textvariable=col_var, values=available, state="readonly", width=44)),
+                ("Names are written as:", ttk.Combobox(body, textvariable=fmt_var, values=fmt_labels, state="readonly", width=44)),
+                ("Same numbers as:", ttk.Combobox(body, textvariable=combo_var, values=combo_labels, state="readonly", width=60))]
+        first_box = ttk.Combobox(body, textvariable=first_var, state="readonly", width=44)
+        last_box = ttk.Combobox(body, textvariable=last_var, state="readonly", width=44)
+        rows += [("First-name column there:", first_box), ("Last-name column there:", last_box)]
+        for i, (caption, widget) in enumerate(rows, start=1):
+            ttk.Label(body, text=caption).grid(row=i, column=0, sticky="w", pady=2, padx=(0, 8))
+            widget.grid(row=i, column=1, sticky="w", pady=2)
+
+        def chosen_combo():
+            return combos[combo_labels.index(combo_var.get())]
+
+        def on_combo(*_a):
+            parts = chosen_combo()["parts"]
+            first_box.configure(values=parts)
+            last_box.configure(values=parts)
+            f = next((p for p in parts if "first" in p.lower() or "given" in p.lower()), parts[0])
+            l = next((p for p in parts if ("last" in p.lower() or "surname" in p.lower() or "family" in p.lower())
+                      and p != f), next(p for p in parts if p != f))
+            first_var.set(f)
+            last_var.set(l)
+        combo_var.trace_add("write", on_combo)
+        on_combo()
+
+        ttk.Label(
+            body,
+            text="Matching ignores capitals, periods and extra spaces. \"Smith, John A.\" matches John "
+                 "Smith only if he is the one John Smith; when two people could fit, or nobody does, "
+                 "the name gets a new number of its own -- never someone else's. The summary lists "
+                 "every approximate and uncertain match for you to check.",
+            wraplength=480, justify="left", foreground="#a15c00",
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        def on_ok():
+            if first_var.get() == last_var.get():
+                messagebox.showerror(APP_TITLE, "Pick two different columns for first and last name.", parent=dlg)
+                return
+            self._add_fullname(col_var.get(), chosen_combo(), first_var.get(), last_var.get(),
+                               fmt_keys[fmt_labels.index(fmt_var.get())])
+            dlg.destroy()
+
+        btns = ttk.Frame(body)
+        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
+        ttk.Button(btns, text="Add", command=on_ok).pack(side="right", padx=(0, 6))
+        try:
+            dlg.wait_visibility()
+            dlg.grab_set()
+        except tk.TclError:
+            pass
 
     def _changed(self):
         if self.on_change is not None:
@@ -997,7 +1182,9 @@ class DocumentRedactorApp(tk.Tk):
                  "use Combine Columns below instead of ticking them.",
             wraplength=900, justify="left", foreground="#444",
         ).pack(anchor="w", pady=(0, 8))
-        self.combined_section = _CombinedColumnsSection(self, self.spreadsheet_panel)
+        self.combined_section = _CombinedColumnsSection(
+            self, self.spreadsheet_panel, combo_source=self._combinations_in_loaded_keys
+        )
         self.combined_section.frame.pack(side="bottom", fill="x", pady=(8, 0))
         col_scroll_outer, self.column_list_inner = self._build_scrollable_frame(self.spreadsheet_panel)
         col_scroll_outer.pack(fill="both", expand=True)
@@ -1349,6 +1536,24 @@ class DocumentRedactorApp(tk.Tk):
                 "as:\" -- click Load Columns again so the column checklist picks up the "
                 "change; columns already listed won't update on their own.",
             )
+
+    def _combinations_in_loaded_keys(self):
+        """Combinations (e.g. First Name + Last Name) recorded in the key
+        file(s) loaded with "Use existing key file(s)" -- what a full-name
+        column can be numbered against (see _CombinedColumnsSection)."""
+        xs = document_types.excel_spreadsheet
+        combos, seen = [], set()
+        for p in self.redact_existing_key_paths:
+            for name, value_map in (self.redact_existing_key_maps.get(p) or {}).items():
+                if not xs.is_combined_column_name(name) or name in seen or not value_map:
+                    continue
+                seen.add(name)
+                label = next((xs.placeholder_label_and_number(ph)[0] for ph in value_map.values()
+                              if xs.placeholder_label_and_number(ph)[0]), "Name")
+                parts = name[len(xs.COMBINED_COLUMN_PREFIX):].split(" + ")
+                if len(parts) >= 2:
+                    combos.append({"name": name, "parts": parts, "label": label})
+        return combos
 
     def _resolve_redact_existing_numbering(self):
         """Merges every currently-loaded SAME-document-type existing-key
@@ -1963,6 +2168,18 @@ class DocumentRedactorApp(tk.Tk):
         if key_error:
             messagebox.showerror(APP_TITLE, key_error)
             return
+        here = {c["name"] for c in selected if c.get("combine")}
+        orphan = [c["name"] for c in selected if c.get("full_name")
+                  and c["full_name"]["combined"] not in here
+                  and not (existing_state or {}).get(c["full_name"]["combined"])]
+        if orphan and not messagebox.askyesno(
+            APP_TITLE,
+            f"The full-name column(s) {', '.join(orphan)} are set to match a combination whose key "
+            "file is no longer loaded, so every name would get a NEW number and nothing would "
+            "line up with the earlier files.\n\nRedact anyway?",
+            icon="warning",
+        ):
+            return
 
         cross_pools, cross_normalize_fns, cross_error = self._resolve_redact_cross_type_pools()
         if cross_error:
@@ -2200,6 +2417,7 @@ class DocumentRedactorApp(tk.Tk):
                 "de-identified without checking why. Exact location and value for each one "
                 f"is in the review log:\n{review_log_path or '(could not be saved)'}"
             )
+        msg += _full_name_summary_text(summary)
         if summary.get("combined_parts_missing"):
             shown = ", ".join(summary["combined_parts_missing"])
             msg += (
@@ -3828,6 +4046,7 @@ class DocumentRedactorApp(tk.Tk):
                     per_file_summaries.append(
                         f"{name}: {summary['cells_redacted']} cell(s) redacted across "
                         f"{summary['columns_found']} column(s){not_found_note}{review_note}"
+                        + _full_name_summary_text(summary, limit=3).replace("\n\n", "\n    ")
                     )
                     report(
                         i, len(files), name,

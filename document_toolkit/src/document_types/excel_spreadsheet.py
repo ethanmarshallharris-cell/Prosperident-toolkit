@@ -210,14 +210,32 @@ def combined_identity_text(values) -> str:
 
 
 def _split_selection(selected_columns: List[dict]):
-    """(plain {name: label}, [combined entries]) from a selected_columns
-    list, after checking no real column is used twice -- once on its own
-    and once in a combination, or in two combinations. Either would make
-    one cell receive two different placeholders, so it is refused."""
+    """(plain {name: label}, [combined entries], [full-name entries]) from
+    a selected_columns list, after checking no real column is used twice --
+    once on its own and once in a combination, or in two combinations.
+    Either would make one cell receive two different placeholders, so it
+    is refused. See "FULL-NAME COLUMNS" for the third kind."""
     plain = {}
     groups = []
+    fullnames = []
     used = {}
     for entry in selected_columns:
+        fn = entry.get("full_name")
+        if fn:
+            name = entry["name"]
+            if name in used:
+                raise ValueError(f'Column "{name}" is selected more than once ({used[name]} and as a full name).')
+            used[name] = "as a full name"
+            parts = [str(p) for p in fn["parts"]]
+            if fn["first"] not in parts or fn["last"] not in parts or fn["first"] == fn["last"]:
+                raise ValueError(f"Full-name column '{name}': first and last name must be two of {parts}.")
+            if fn.get("format") not in NAME_FORMATS:
+                raise ValueError(f"Full-name column '{name}': unknown name format {fn.get('format')!r}.")
+            fullnames.append({
+                "name": name, "label": entry["label"], "combined": fn["combined"], "parts": parts,
+                "first": fn["first"], "last": fn["last"], "format": fn["format"],
+            })
+            continue
         parts = entry.get("combine")
         if parts:
             parts = [str(p) for p in parts]
@@ -237,7 +255,147 @@ def _split_selection(selected_columns: List[dict]):
                 raise ValueError(f'Column "{name}" is selected more than once ({used[name]} and on its own).')
             used[name] = "on its own"
             plain[name] = entry["label"]
-    return plain, groups
+    return plain, groups, fullnames
+
+
+# --------------------------------------------------------------------------
+# FULL-NAME COLUMNS (added October 2026)
+# --------------------------------------------------------------------------
+# One column holding a whole name ("Smith, John") numbered the SAME as an
+# existing First Name + Last Name combination -- from a key file loaded
+# with "Use existing key file(s)", or a combination in the same batch --
+# so the same person gets the same <Name N> whichever way a file writes
+# the name. An entry in selected_columns:
+#     {"name": "Patient", "label": "Name",
+#      "full_name": {"combined": "Combined: First Name + Last Name",
+#                    "parts": ["First Name", "Last Name"],
+#                    "first": "First Name", "last": "Last Name",
+#                    "format": "last_first"}}
+# Formats: "last_first" (Smith, John), "first_last" (John Smith),
+# "last_first_space" (Smith John). A comma always means "Last, First",
+# whichever format is chosen.
+#
+# MATCHING, in order (first that gives exactly ONE person wins):
+#   1. the exact cell text, if an earlier full-name redaction recorded it;
+#   2. same first and last name, ignoring capitals, periods and extra
+#      spaces ("SMITH, JOHN" = John Smith). Without a comma, the whole
+#      name is also compared word for word, so "Mary Ann Lee" can still
+#      match First "Mary Ann" + Last "Lee";
+#   3. APPROXIMATE: same last name and same first word of the first name
+#      ("Smith, John A." = John Smith), only when exactly one person fits.
+# Two or more people fitting is AMBIGUOUS: the cell gets a new number of
+# its own -- never someone else's -- and is listed for checking. A name
+# that matches nobody gets the next new number in the combination, and
+# the key records it as a combination too (first/last parts), so later
+# files written either way match it.
+#
+# The key also gets an ordinary row (this column, placeholder, the cell's
+# exact text) so un-redaction restores the column exactly. If a file
+# spells one person two ways ("Smith, John" and "SMITH, JOHN") both get
+# the same number, but un-redaction can only restore one spelling: the
+# first one is kept and the others are listed in the summary.
+NAME_FORMATS = {
+    "last_first": "Last, First  (e.g. Smith, John)",
+    "first_last": "First Last  (e.g. John Smith)",
+    "last_first_space": "Last First, no comma  (e.g. Smith John)",
+}
+
+_PLACEHOLDER_NUMBER_RE = re.compile(r"^<(.+) (\d+)>$")
+
+
+def _norm_name(text) -> str:
+    return " ".join(str(text).replace(",", " ").replace(".", " ").lower().split())
+
+
+def parse_full_name(text: str, fmt: str):
+    """(first, last) from a full-name cell, per the chosen format (a comma
+    always splits "Last, First")."""
+    t = str(text).strip()
+    if "," in t:
+        last, first = t.split(",", 1)
+        return first.strip(), last.strip()
+    words = t.split()
+    if not words:
+        return "", ""
+    if fmt == "first_last":
+        return " ".join(words[:-1]), words[-1]
+    return " ".join(words[1:]), words[0]
+
+
+def placeholder_label_and_number(placeholder):
+    m = _PLACEHOLDER_NUMBER_RE.match(str(placeholder))
+    return (m.group(1), int(m.group(2))) if m else (None, None)
+
+
+class _FullNameMatcher:
+    """Looks up / allocates the combination number for full-name cells
+    against one combination's {encoded: placeholder} map (shared with the
+    combination itself when it is redacted in the same file)."""
+
+    def __init__(self, group_map, parts, first, last, label, counter_ref):
+        self.map = group_map
+        self.parts = parts
+        self.fi = parts.index(first)
+        self.li = parts.index(last)
+        self.label = label
+        self.counter = counter_ref        # {"n": next-number-minus-one}, shared
+        self.pair = {}                    # (first, last) normalized -> {placeholder}
+        self.seq_fl = {}                  # "first last" -> {placeholder}
+        self.seq_lf = {}                  # "last first" -> {placeholder}
+        self.first_word = {}              # (first word, last) -> {placeholder}
+        self.display = {}                 # placeholder -> "First Last" (for reports)
+        for encoded, ph in list(group_map.items()):
+            self._index(encoded, ph)
+
+    def _index(self, encoded, ph):
+        try:
+            values = decode_combined_value(encoded)
+        except (ValueError, TypeError):
+            return
+        if len(values) != len(self.parts):
+            return
+        f, l = _norm_name(values[self.fi]), _norm_name(values[self.li])
+        if not f and not l:
+            return
+        self.pair.setdefault((f, l), set()).add(ph)
+        self.seq_fl.setdefault(f"{f} {l}".strip(), set()).add(ph)
+        self.seq_lf.setdefault(f"{l} {f}".strip(), set()).add(ph)
+        if f:
+            self.first_word.setdefault((f.split()[0], l), set()).add(ph)
+        self.display.setdefault(ph, f"{values[self.fi]} {values[self.li]}".strip())
+
+    def resolve(self, text, fmt):
+        """(placeholder, how) -- how is "exact", "approximate", "ambiguous" or "new"."""
+        first, last = parse_full_name(text, fmt)
+        f, l = _norm_name(first), _norm_name(last)
+        hits = set(self.pair.get((f, l), set()))
+        if "," not in text:
+            whole = _norm_name(text)
+            hits |= (self.seq_fl if fmt == "first_last" else self.seq_lf).get(whole, set())
+        if len(hits) == 1:
+            return next(iter(hits)), "exact"
+        how = "ambiguous" if hits else None
+        if not hits and f:
+            approx = self.first_word.get((f.split()[0], l), set())
+            if len(approx) == 1:
+                return next(iter(approx)), "approximate"
+            if len(approx) > 1:
+                how = "ambiguous"
+        values = [""] * len(self.parts)
+        values[self.fi], values[self.li] = first, last
+        encoded = encode_combined_value(values)
+        if encoded in self.map and how is None:
+            return self.map[encoded], "exact"
+        if how == "ambiguous" or encoded in self.map:
+            # Never give this cell another person's number: a number of
+            # its own, recorded under the cell's own text only.
+            self.counter["n"] += 1
+            return f"<{self.label} {self.counter['n']}>", "ambiguous"
+        self.counter["n"] += 1
+        ph = f"<{self.label} {self.counter['n']}>"
+        self.map[encoded] = ph
+        self._index(encoded, ph)
+        return ph, "new"
 
 
 def _combined_key_rows(group_name: str, parts: List[str], value_map: Dict[str, str]) -> List[dict]:
@@ -453,6 +611,35 @@ def distinct_combined_values(path: str, parts: List[str]) -> "set[tuple]":
         wb.close()
 
 
+def _resolve_full_name(col_name, text, col_map, matcher, fmt, cache, report):
+    """The placeholder for one full-name cell (see "FULL-NAME COLUMNS"),
+    recording how it was matched in `report`. `col_map` is the column's
+    {cell text: placeholder} map that becomes its key rows: only the FIRST
+    spelling of each person goes in, so un-redaction is unambiguous."""
+    key = (col_name, text)
+    if key in cache:
+        return cache[key]
+    ph = col_map.get(text)
+    how = "exact" if ph else None
+    if ph is None:
+        ph, how = matcher.resolve(text, fmt)
+        if ph in col_map.values():
+            first = next(v for v, p in col_map.items() if p == ph)
+            report["variants"][text] = f"{ph} (restores as {first!r})"
+        else:
+            col_map[text] = ph
+    if how == "approximate":
+        report["approximate"][text] = f"{ph} = {matcher.display.get(ph, '')}"
+    elif how == "ambiguous":
+        report["ambiguous"][text] = ph
+    elif how == "new":
+        report["new"].add(ph)
+    else:
+        report["matched"].add(ph)
+    cache[key] = ph
+    return ph
+
+
 def apply_column_redaction(
     input_path: str,
     output_path: str,
@@ -508,7 +695,13 @@ def apply_column_redaction(
                 the whole batch (a column absent from the last file
                 wouldn't otherwise be represented).
     """
-    label_by_name, groups = _split_selection(selected_columns)
+    label_by_name, groups, fullnames = _split_selection(selected_columns)
+    # A full-name column is found and seeded like an ordinary column (its
+    # map holds the cell texts already numbered); its cells are numbered
+    # through the combination instead -- see "FULL-NAME COLUMNS".
+    fullname_by_col = {fn["name"]: fn for fn in fullnames}
+    for fn in fullnames:
+        label_by_name[fn["name"]] = fn["label"]
     all_parts = {p for g in groups for p in g["parts"]}
     wb = _open_workbook(input_path)
     try:
@@ -567,7 +760,50 @@ def apply_column_redaction(
         group_maps: "Dict[str, Dict[str, str]]" = {
             g["name"]: dict(state.get(g["name"], {})) for g in groups if g["name"] in found_groups
         }
-        group_counters = {name: len(m) for name, m in group_maps.items()}
+        # Next number per combination: past every number already used for
+        # its label anywhere in the carried-forward state (not just the
+        # combination's own count), so a number given to an ambiguous
+        # full-name cell in an earlier file is never handed out again.
+        def _start_number(name, label):
+            used = [placeholder_label_and_number(ph) for ph in group_maps[name].values()]
+            labels = {lab for lab, _n in used if lab} or {label}
+            top = len(group_maps[name])
+            for col_map in state.values():
+                if not isinstance(col_map, dict):
+                    continue
+                for ph in col_map.values():
+                    lab, n = placeholder_label_and_number(ph)
+                    if lab in labels and n > top:
+                        top = n
+            return top
+
+        extra_groups = []       # combinations numbered only through a full-name column
+        fullname_matchers = {}  # full-name column -> _FullNameMatcher
+        fullname_report = {}    # full-name column -> counts / examples for the summary
+        for fn in fullnames:
+            if fn["name"] not in found_names:
+                continue
+            cname = fn["combined"]
+            if cname not in group_maps:
+                group_maps[cname] = dict(state.get(cname, {}))
+                extra_groups.append({"name": cname, "parts": fn["parts"], "label": fn["label"]})
+        label_of_group = {g["name"]: g["label"] for g in groups + extra_groups}
+        group_counters = {name: {"n": _start_number(name, label_of_group[name])} for name in group_maps}
+        for fn in fullnames:
+            if fn["name"] not in found_names:
+                continue
+            cname = fn["combined"]
+            existing_labels = [placeholder_label_and_number(ph)[0] for ph in group_maps[cname].values()]
+            label = label_of_group.get(cname) if cname not in {g["name"] for g in extra_groups} else None
+            label = label or next((lab for lab in existing_labels if lab), None) or fn["label"]
+            fullname_matchers[fn["name"]] = _FullNameMatcher(
+                group_maps[cname], fn["parts"], fn["first"], fn["last"], label, group_counters[cname]
+            )
+            fullname_report[fn["name"]] = {
+                "combination": cname, "matched": set(), "new": set(), "approximate": {},
+                "ambiguous": {}, "variants": {},
+            }
+        fullname_cache = {}     # (column, cell text) -> placeholder
         cells_redacted = 0
         current = 0
 
@@ -595,9 +831,12 @@ def apply_column_redaction(
                         g_map = group_maps[g["name"]]
                         placeholder_text = g_map.get(encoded)
                         if placeholder_text is None:
-                            group_counters[g["name"]] += 1
-                            placeholder_text = f"<{g['label']} {group_counters[g['name']]}>"
+                            group_counters[g["name"]]["n"] += 1
+                            placeholder_text = f"<{g['label']} {group_counters[g['name']]['n']}>"
                             g_map[encoded] = placeholder_text
+                            matcher_for = [m for m in fullname_matchers.values() if m.map is g_map]
+                            for m in matcher_for:
+                                m._index(encoded, placeholder_text)
                         for c, v in zip(part_cells, values):
                             if c is not None and v:
                                 c.value = placeholder_text
@@ -610,6 +849,13 @@ def apply_column_redaction(
                         continue
                     value_str = str(cell.value)
                     col_map = placeholder_maps[col_name]
+                    if col_name in fullname_matchers:
+                        cell.value = _resolve_full_name(
+                            col_name, value_str, col_map, fullname_matchers[col_name],
+                            fullname_by_col[col_name]["format"], fullname_cache, fullname_report[col_name],
+                        )
+                        cells_redacted += 1
+                        continue
                     placeholder_text = col_map.get(value_str)
                     if placeholder_text is None:
                         counters[col_name] += 1
@@ -634,7 +880,7 @@ def apply_column_redaction(
         for col_name, col_map in placeholder_maps.items():
             for value_str, placeholder_text in col_map.items():
                 key_rows.append({"column": col_name, "placeholder": placeholder_text, "value": value_str})
-        for g in groups:
+        for g in groups + extra_groups:
             if g["name"] in group_maps:
                 key_rows.extend(_combined_key_rows(g["name"], g["parts"], group_maps[g["name"]]))
 
@@ -645,6 +891,17 @@ def apply_column_redaction(
             "columns_found": len(found_names) + len(found_groups),
             "columns_not_found": not_found,
             "combined_parts_missing": parts_missing,
+            "full_name_columns": {
+                col: {
+                    "combination": r["combination"],
+                    "matched": len(r["matched"]),
+                    "new": len(r["new"]),
+                    "approximate": sorted(r["approximate"].items()),
+                    "ambiguous": sorted(r["ambiguous"].items()),
+                    "variants": sorted(r["variants"].items()),
+                }
+                for col, r in fullname_report.items()
+            },
             "cells_redacted": cells_redacted,
             "unique_values_redacted": (
                 sum(len(m) for m in placeholder_maps.values())

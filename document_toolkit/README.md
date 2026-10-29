@@ -14,6 +14,34 @@ itself. Two document types exist today:
   auto-detecting matches (see below -- this one works differently from the
   PDF type, by design).
 
+## Full-name columns: "Smith, John" matched to First + Last Name (added October 2026)
+
+When earlier files were redacted with First Name + Last Name combined into
+`<Name N>`, and a new file has the whole name in ONE column ("Smith, John",
+"John Smith" or "Smith John"), the new file can use the same numbers:
+
+1. Choose the new file and click **Load Columns**.
+2. **Use existing key file(s)...** and pick the key from the earlier
+   redaction (the latest one-stop key covers every file before it).
+3. Under "Combine columns into one placeholder", click
+   **Full-Name Column...**: pick the column, how the names are written, and
+   the First Name + Last Name combination to match. **Add**, then
+   **Redact & Save**.
+
+Each name gets the number that person already has. Matching ignores
+capitals, periods and extra spaces; without a comma the whole name is
+compared word for word, so "Mary Ann Lee" still matches First "Mary Ann" +
+Last "Lee". "Smith, John A." matches John Smith only when he is the only
+John Smith (listed as an approximate match to check). When two people
+could fit, or nobody does, the name gets a NEW number of its own -- never
+someone else's -- and new people are added to the combination in the key,
+so later files written either way match them too. The summary lists every
+approximate and uncertain match. If one person is spelled two ways in the
+file ("Smith, John" and "SMITH, JOHN") both get the same number, but
+un-redaction restores the first spelling; those are listed too. Batch
+Redact supports the same thing when the First/Last file and the full-name
+file are in one batch.
+
 ## CSV files (added October 2026)
 
 A .csv file is redacted exactly like an Excel workbook: Load Columns lists
