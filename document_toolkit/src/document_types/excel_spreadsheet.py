@@ -344,6 +344,8 @@ class _FullNameMatcher:
         self.seq_lf = {}                  # "last first" -> {placeholder}
         self.first_word = {}              # (first word, last) -> {placeholder}
         self.display = {}                 # placeholder -> "First Last" (for reports)
+        self.siblings = [self]            # every matcher sharing this map (several
+                                          # full-name columns -> one combination)
         for encoded, ph in list(group_map.items()):
             self._index(encoded, ph)
 
@@ -394,7 +396,8 @@ class _FullNameMatcher:
         self.counter["n"] += 1
         ph = f"<{self.label} {self.counter['n']}>"
         self.map[encoded] = ph
-        self._index(encoded, ph)
+        for m in self.siblings:
+            m._index(encoded, ph)
         return ph, "new"
 
 
@@ -799,6 +802,11 @@ def apply_column_redaction(
             fullname_matchers[fn["name"]] = _FullNameMatcher(
                 group_maps[cname], fn["parts"], fn["first"], fn["last"], label, group_counters[cname]
             )
+            for other in fullname_matchers.values():
+                if other.map is group_maps[cname] and other is not fullname_matchers[fn["name"]]:
+                    other.siblings.append(fullname_matchers[fn["name"]])
+                    fullname_matchers[fn["name"]].siblings = other.siblings
+                    break
             fullname_report[fn["name"]] = {
                 "combination": cname, "matched": set(), "new": set(), "approximate": {},
                 "ambiguous": {}, "variants": {},

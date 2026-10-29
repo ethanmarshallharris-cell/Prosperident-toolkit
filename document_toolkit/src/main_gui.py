@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-29"
+APP_BUILD = "2026-10-29.1"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -2464,109 +2464,190 @@ class DocumentRedactorApp(tk.Tk):
     # (both choices are written to a durable review log before the file
     # is treated as finished; see write_manual_review_log()).
     # ----------------------------------------------------------------
-    def _build_leak_review_rows(self, parent, leaks):
-        """Builds one review row (a bordered Frame with location, row
-        context, and Replace/Ignore controls) per leak inside `parent`.
-        Shared by the single-file Redact tab's review window
-        (_open_leak_review) and the Batch Redact tab's per-file review
-        window (_open_batch_leak_review) so the two never drift apart --
-        same enriched location description (column header + other values
-        in the same row) either way. Returns row_vars, one dict per leak:
-        {'leak', 'action_var', 'placeholder_var', 'placeholder_by_choice'}.
-        """
-        row_vars = []
+    # Review groups shown per page. Building one window with thousands of
+    # review rows is what made it hang -- and past ~32,000 pixels of rows
+    # the window system can't draw it at all, which is how the Apply
+    # Decisions button disappeared.
+    _LEAK_GROUPS_PER_PAGE = 40
+
+    @staticmethod
+    def _group_leaks(leaks):
+        """Leaks -> groups of cells with the same value in the same column
+        (and the same placeholder choices), in first-seen order: one
+        decision per group instead of one per cell."""
+        groups = {}
         for leak in leaks:
-            frame = tk.Frame(parent, relief="groove", borderwidth=1)
-            frame.pack(fill="x", pady=4, padx=2)
-
-            loc_text = f"{leak['sheet']}!{leak['coordinate']}"
-            if leak["is_header_row"]:
-                loc_text += "   (row 1 -- header row, not a data row)"
-            elif leak.get("column_header"):
-                loc_text += f"   -- in column '{leak['column_header']}'"
-            tk.Label(frame, text=loc_text, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(
-                fill="x", padx=8, pady=(6, 0)
+            key = (
+                leak.get("column_header") or "",
+                leak["value"],
+                bool(leak["is_header_row"]),
+                tuple((p["column"], p["placeholder"]) for p in leak["placeholders"]),
             )
+            groups.setdefault(key, []).append(leak)
+        return list(groups.values())
 
-            row_context = leak.get("row_context") or []
-            if row_context and not leak["is_header_row"]:
-                context_text = "Same row also has: " + "; ".join(
-                    f"{c['label']}: {c['value']}" for c in row_context
-                )
-                tk.Label(
-                    frame, text=context_text, wraplength=760, justify="left", anchor="w",
-                    fg="#444444",
-                ).pack(fill="x", padx=8, pady=(0, 0))
-
-            value_row = tk.Frame(frame)
-            value_row.pack(fill="x", padx=8, pady=(2, 2))
-            tk.Label(value_row, text="Value still present:").pack(side="left")
-            value_entry = tk.Entry(value_row)
-            value_entry.insert(0, leak["value"])
-            value_entry.configure(state="readonly")
-            value_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
-
+    def _build_leak_review_rows(self, parent, leaks):
+        """Builds the review inside `parent`: one bordered row per GROUP of
+        leaks sharing a column and value (see _group_leaks), with location,
+        row context and Replace/Ignore controls, shown a page at a time,
+        plus "Set all to Replace / Ignore" buttons. Shared by the
+        single-file Redact tab's review window (_open_leak_review) and the
+        Batch Redact tab's per-file review window (_open_batch_leak_review).
+        Returns row_vars, one dict per group: {'leaks', 'action_var',
+        'placeholder_var', 'placeholder_by_choice'} -- _collect_leak_decisions
+        expands each group back into one decision per cell. Choices are
+        kept for every group, including those on pages not shown.
+        """
+        groups = self._group_leaks(leaks)
+        row_vars = []
+        for group in groups:
+            leak = group[0]
             choices = [
                 f"{p['placeholder']}  (from column '{p['column']}')" for p in leak["placeholders"]
             ]
-            placeholder_by_choice = {c: p["placeholder"] for c, p in zip(choices, leak["placeholders"])}
-            placeholder_var = tk.StringVar(value=choices[0])
-
             # Default to Ignore for a header-row match (very likely just a
             # label coincidence, not real data) and Replace for a data-row
             # match (very likely a genuine leak worth scrubbing) -- either
             # way, the user sees and can override the default before
             # anything is actually applied.
-            action_var = tk.StringVar(value="ignore" if leak["is_header_row"] else "replace")
-
-            action_row = tk.Frame(frame)
-            action_row.pack(fill="x", padx=8, pady=(0, 6))
-            tk.Radiobutton(action_row, text="Replace with:", variable=action_var, value="replace").pack(side="left")
-            if len(choices) > 1:
-                combo = ttk.Combobox(
-                    action_row, textvariable=placeholder_var, values=choices, state="readonly", width=44
-                )
-                combo.pack(side="left", padx=(4, 12))
-            else:
-                tk.Label(action_row, text=choices[0]).pack(side="left", padx=(4, 12))
-            tk.Radiobutton(
-                action_row, text="Ignore (leave value as-is)", variable=action_var, value="ignore"
-            ).pack(side="left")
-
             row_vars.append({
-                "leak": leak,
-                "action_var": action_var,
-                "placeholder_var": placeholder_var,
-                "placeholder_by_choice": placeholder_by_choice,
+                "leaks": group,
+                "choices": choices,
+                "action_var": tk.StringVar(value="ignore" if leak["is_header_row"] else "replace"),
+                "placeholder_var": tk.StringVar(value=choices[0]),
+                "placeholder_by_choice": {c: p["placeholder"] for c, p in zip(choices, leak["placeholders"])},
             })
+        per_page = self._LEAK_GROUPS_PER_PAGE
+        pages = max(1, (len(row_vars) + per_page - 1) // per_page)
+
+        top = tk.Frame(parent)
+        top.pack(fill="x", pady=(0, 4), padx=2)
+        tk.Label(
+            top,
+            text=f"{len(leaks)} cell(s) in {len(groups)} group(s) -- cells with the same value in the "
+                 "same column are grouped, one decision each.",
+            anchor="w", fg="#444444", wraplength=520, justify="left",
+        ).pack(side="left")
+
+        def set_all(action):
+            for rv in row_vars:
+                rv["action_var"].set(action)
+        tk.Button(top, text="Set all to Ignore", command=lambda: set_all("ignore")).pack(side="right")
+        tk.Button(top, text="Set all to Replace", command=lambda: set_all("replace")).pack(side="right", padx=(0, 6))
+
+        nav = tk.Frame(parent)
+        page_label = tk.Label(nav, text="")
+        page_frame = tk.Frame(parent)
+        state = {"page": 0}
+
+        def render():
+            for w in page_frame.winfo_children():
+                w.destroy()
+            first = state["page"] * per_page
+            for rv in row_vars[first:first + per_page]:
+                self._build_one_leak_group_row(page_frame, rv)
+            page_label.configure(text=f"Page {state['page'] + 1} of {pages}  "
+                                      f"(groups {first + 1}-{min(first + per_page, len(row_vars))})")
+            prev_btn.configure(state="normal" if state["page"] > 0 else "disabled")
+            next_btn.configure(state="normal" if state["page"] < pages - 1 else "disabled")
+            # back to the top of the scroll area
+            w = parent
+            while w is not None and not isinstance(w, tk.Canvas):
+                w = w.master
+            if w is not None:
+                try:
+                    w.yview_moveto(0)
+                except tk.TclError:
+                    pass
+
+        def go(step):
+            state["page"] = min(max(state["page"] + step, 0), pages - 1)
+            render()
+
+        prev_btn = tk.Button(nav, text="< Previous page", command=lambda: go(-1))
+        next_btn = tk.Button(nav, text="Next page >", command=lambda: go(1))
+        if pages > 1:
+            nav.pack(fill="x", pady=(0, 4), padx=2)
+            prev_btn.pack(side="left")
+            page_label.pack(side="left", padx=10)
+            next_btn.pack(side="left")
+        page_frame.pack(fill="x")
+        render()
         return row_vars
+
+    def _build_one_leak_group_row(self, parent, rv):
+        group = rv["leaks"]
+        leak = group[0]
+        frame = tk.Frame(parent, relief="groove", borderwidth=1)
+        frame.pack(fill="x", pady=4, padx=2)
+
+        cells = ", ".join(f"{l['sheet']}!{l['coordinate']}" for l in group[:6])
+        more = f" and {len(group) - 6} more" if len(group) > 6 else ""
+        loc_text = f"{len(group)} cells: {cells}{more}" if len(group) > 1 else cells
+        if leak["is_header_row"]:
+            loc_text += "   (row 1 -- header row, not a data row)"
+        elif leak.get("column_header"):
+            loc_text += f"   -- in column '{leak['column_header']}'"
+        tk.Label(frame, text=loc_text, font=("TkDefaultFont", 9, "bold"), anchor="w",
+                 wraplength=760, justify="left").pack(fill="x", padx=8, pady=(6, 0))
+
+        row_context = leak.get("row_context") or []
+        if row_context and not leak["is_header_row"]:
+            prefix = "Same row also has: " if len(group) == 1 else "First one's row also has: "
+            tk.Label(
+                frame, text=prefix + "; ".join(f"{c['label']}: {c['value']}" for c in row_context),
+                wraplength=760, justify="left", anchor="w", fg="#444444",
+            ).pack(fill="x", padx=8, pady=(0, 0))
+
+        value_row = tk.Frame(frame)
+        value_row.pack(fill="x", padx=8, pady=(2, 2))
+        tk.Label(value_row, text="Value still present:").pack(side="left")
+        value_entry = tk.Entry(value_row)
+        value_entry.insert(0, leak["value"])
+        value_entry.configure(state="readonly")
+        value_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        choices = rv["choices"]
+        action_row = tk.Frame(frame)
+        action_row.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Radiobutton(action_row, text="Replace with:", variable=rv["action_var"], value="replace").pack(side="left")
+        if len(choices) > 1:
+            ttk.Combobox(
+                action_row, textvariable=rv["placeholder_var"], values=choices, state="readonly", width=44
+            ).pack(side="left", padx=(4, 12))
+        else:
+            tk.Label(action_row, text=choices[0]).pack(side="left", padx=(4, 12))
+        tk.Radiobutton(
+            action_row, text="Ignore (leave value as-is)", variable=rv["action_var"], value="ignore"
+        ).pack(side="left")
 
     @staticmethod
     def _collect_leak_decisions(row_vars):
         """row_vars (from _build_leak_review_rows) -> the 'decisions' list
         shape both apply_leak_decisions() and the review log writer
         expect: [{'sheet', 'coordinate', 'action', 'value', 'placeholder'
-        (only when action == 'replace')}, ...]."""
+        (only when action == 'replace')}, ...] -- one per CELL, so a
+        group's choice applies to every cell in it."""
         decisions = []
         for rv in row_vars:
-            leak = rv["leak"]
             action = rv["action_var"].get()
-            entry = {
-                "sheet": leak["sheet"],
-                "coordinate": leak["coordinate"],
-                "action": action,
-                "value": leak["value"],
-            }
-            if action == "replace":
-                choice = rv["placeholder_var"].get()
-                entry["placeholder"] = rv["placeholder_by_choice"][choice]
-            decisions.append(entry)
+            chosen = rv["placeholder_by_choice"].get(rv["placeholder_var"].get())
+            for leak in rv["leaks"]:
+                entry = {
+                    "sheet": leak["sheet"],
+                    "coordinate": leak["coordinate"],
+                    "action": action,
+                    "value": leak["value"],
+                }
+                if action == "replace":
+                    entry["placeholder"] = chosen
+                decisions.append(entry)
         return decisions
 
     def _open_leak_review(self, result, summary, output_path, key_path, doc_type, selected, key_rows):
         win = tk.Toplevel(self)
         win.title(f"{APP_TITLE} -- Manual Review")
-        win.geometry("820x560")
+        win.geometry("880x640")
         win.transient(self)
         win.grab_set()
 
@@ -2590,7 +2671,7 @@ class DocumentRedactorApp(tk.Tk):
         row_vars = self._build_leak_review_rows(inner, result["leaks"])
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
 
         def on_cancel():
             win.destroy()
@@ -2847,7 +2928,7 @@ class DocumentRedactorApp(tk.Tk):
     def _open_pdf_leak_review(self, result, output_path, key_path, doc_type, included):
         win = tk.Toplevel(self)
         win.title(f"{APP_TITLE} -- Manual Review")
-        win.geometry("820x560")
+        win.geometry("880x640")
         win.transient(self)
         win.grab_set()
 
@@ -2873,7 +2954,7 @@ class DocumentRedactorApp(tk.Tk):
         row_vars = self._build_pdf_leak_review_rows(inner, result["leaks"], doc_type)
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
 
         def on_cancel():
             win.destroy()
@@ -3067,7 +3148,7 @@ class DocumentRedactorApp(tk.Tk):
         row_vars = self._build_leak_review_rows(inner, result["leaks"])
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
 
         def finish(final_outcome):
             outcome.clear()
@@ -3203,7 +3284,7 @@ class DocumentRedactorApp(tk.Tk):
         row_vars = self._build_pdf_leak_review_rows(inner, result["leaks"], dt)
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
 
         def finish(final_outcome):
             outcome.clear()
@@ -4846,7 +4927,7 @@ class DocumentRedactorApp(tk.Tk):
             win.destroy()
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
         tk.Button(btn_row, text="Cancel", command=win.destroy).pack(side="right")
         tk.Button(btn_row, text="Continue", command=on_ok).pack(side="right", padx=(0, 8))
         try:
@@ -4870,7 +4951,7 @@ class DocumentRedactorApp(tk.Tk):
     def _open_ambiguous_review(self, apply_result, output_path, kind, engine, key_mapping):
         win = tk.Toplevel(self)
         win.title(f"{APP_TITLE} -- Manual Review")
-        win.geometry("820x560")
+        win.geometry("880x640")
         win.transient(self)
         win.grab_set()
 
@@ -4932,7 +5013,7 @@ class DocumentRedactorApp(tk.Tk):
             })
 
         btn_row = tk.Frame(win)
-        btn_row.pack(fill="x", padx=12, pady=(6, 12))
+        btn_row.pack(side="bottom", fill="x", padx=12, pady=(6, 12), before=outer)
 
         def on_cancel():
             win.destroy()
