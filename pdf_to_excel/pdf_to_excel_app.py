@@ -18,11 +18,18 @@ ON THE PAGE
   * The same breaks apply to every page. The table area does too, unless
     "This page has its own table area" is ticked for a page.
 
+SCANNED PAGES are read with OCR (see pdf_table_engine.py "SCANNED PAGES
+(OCR)") in separate worker processes (OcrPool), so the window never
+freezes and several pages are read at once; thin teal boxes show every
+word OCR found. Conversion runs on its own thread with its own copy of the
+PDF, and can be cancelled.
+
 The preview on the right shows exactly what the current page will become,
 and updates as bars move. Layouts (breaks + table area + options) can be
 saved and loaded again for the next PDF in the same format.
 """
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -41,7 +48,7 @@ import branding
 import update_check
 import pdf_table_engine as eng
 
-APP_VERSION = "2026-10-22"
+APP_VERSION = "2026-11-12"
 TOOL_KEY = "pdf_to_excel"
 APP_TITLE = "PDF to Excel"
 
@@ -52,6 +59,16 @@ SHADE = "#1c2331"
 HIT_PX = 6            # how close (pixels) the pointer must be to grab a bar
 MARGIN = 26           # pixels above the page for the column letters
 ZOOMS = ["50%", "75%", "100%", "125%", "150%", "200%", "Fit width"]
+OCR_BOX = "#2a9d8f"
+OCR_CHOICES = {
+    "auto": "Read scanned pages with OCR",
+    "all": "OCR every page (ignore the PDF's own text)",
+    "off": "Off (scanned pages convert as empty)",
+}
+
+
+class _Cancelled(Exception):
+    pass
 
 
 # --------------------------------------------------------------------------
@@ -106,7 +123,13 @@ class App(tk.Tk):
         self.layout = eng.Layout()
         self.scale = 1.0
         self.photo = None
-        self.words_cache = {}
+        self.tessdata = eng.find_tessdata()
+        self.ocr_var = tk.StringVar(value=OCR_CHOICES["auto"] if self.tessdata else OCR_CHOICES["off"])
+        self.source = eng.WordSource(self._ocr_mode(), self.tessdata)
+        self._ocr_jobs = {}             # page -> Future, pages being OCR'd in the background
+        self.ocr_pool = eng.OcrPool()
+        self._autodetect_after_ocr = None
+        self._convert_cancel = None     # threading.Event while a conversion runs
         self.drag = None          # ("break", index) or ("top"|"bottom",)
         self.selected = None      # index into self.layout.breaks
         self._preview_job = None
@@ -128,6 +151,7 @@ class App(tk.Tk):
 
         self._build()
         self._bind_keys()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._set_enabled(False)
         threading.Thread(target=self._update_worker, daemon=True).start()
 
@@ -225,6 +249,16 @@ class App(tk.Tk):
         self.heading_spin.bind("<FocusOut>", lambda e: self._options_changed())
         ttk.Checkbutton(opts, text="Convert amounts to numbers, e.g. (45.00) = -45",
                         variable=self.numbers_var, command=self._options_changed).pack(anchor="w")
+        orow = ttk.Frame(opts); orow.pack(fill="x", pady=(6, 0))
+        ttk.Label(orow, text="Scanned pages:").pack(side="left")
+        self.ocr_combo = ttk.Combobox(orow, textvariable=self.ocr_var, values=list(OCR_CHOICES.values()),
+                                      state="readonly" if self.tessdata else "disabled", width=40)
+        self.ocr_combo.pack(side="left", padx=(6, 0))
+        self.ocr_combo.bind("<<ComboboxSelected>>", lambda e: self._ocr_mode_changed())
+        if not self.tessdata:
+            ttk.Label(opts, foreground=BREAK_COLOR, wraplength=420, justify="left", text=(
+                "OCR isn't available: the OCR language file (tessdata\\eng.traineddata) is missing. "
+                "Download PDF to Excel again from the Tool Suite page.")).pack(anchor="w")
         self.own_area_chk = ttk.Checkbutton(opts, text="This page has its own table top/bottom",
                                             variable=self.own_area_var, command=self._own_area_toggled)
         self.own_area_chk.pack(anchor="w", pady=(6, 0))
@@ -295,7 +329,8 @@ class App(tk.Tk):
         self.doc = doc
         self.pdf_path = path
         self.page_index = 0
-        self.words_cache = {}
+        self.source = eng.WordSource(self._ocr_mode(), self.tessdata)
+        self._ocr_jobs = {}
         self.selected = None
         # Keep breaks the user already placed or loaded (same statement
         # format, next month) -- but drop page-specific areas, which belong
@@ -305,21 +340,88 @@ class App(tk.Tk):
         self.title(f"{APP_TITLE} - {Path(path).name}  (v{APP_VERSION})")
 
         check = range(min(doc.page_count, 5))
-        if not any(eng.page_has_text(doc[i]) for i in check):
+        scanned = not any(eng.page_has_text(doc[i]) for i in check)
+        if scanned and not self.tessdata:
             messagebox.showwarning(APP_TITLE, (
                 "This PDF appears to be scanned: its pages are pictures of text, with no "
-                "text the program can read.\n\nPDF to Excel needs a PDF with real text. "
-                "Run the PDF through OCR first (for example Adobe Acrobat's Scan & OCR "
-                "tool), then open the OCR'd copy here."))
+                "text the program can read, and OCR isn't available on this computer (the "
+                "OCR language file is missing).\n\nDownload PDF to Excel again from the Tool "
+                "Suite page, or run the PDF through OCR first (for example Adobe Acrobat's "
+                "Scan & OCR tool) and open the OCR'd copy here."))
         self.page_px = None
         self.render_page()
         if not self.layout.breaks:
             self.auto_detect(quiet=True)
+        if scanned and self.tessdata and self._ocr_mode() != "off":
+            self.status_var.set("Scanned PDF: pages are read with OCR (a few seconds each). "
+                                "OCR can misread a character -- check the numbers against the PDF.")
+
+    # ------------------------------------------------------------------
+    # Words: the PDF's own text, or OCR in the background for scanned pages
+    # ------------------------------------------------------------------
+    def _ocr_mode(self):
+        label = self.ocr_var.get()
+        return next((k for k, v in OCR_CHOICES.items() if v == label), "auto")
+
+    def _ocr_mode_changed(self):
+        self.source = eng.WordSource(self._ocr_mode(), self.tessdata)
+        self._ocr_jobs = {}
+        if self.doc:
+            self.render_page()
 
     def words(self, i):
-        if i not in self.words_cache:
-            self.words_cache[i] = eng.page_words(self.doc[i])
-        return self.words_cache[i]
+        """Page i's words, or None while OCR is still reading it (it is
+        then started in the background; _ocr_done refreshes the view)."""
+        if self.source.ready(self.doc, i):
+            try:
+                return self.source.words(self.doc, i)
+            except Exception:
+                log.exception("words page %s", i)
+                return []
+        self._start_ocr(i)
+        return None
+
+    def _start_ocr(self, i):
+        if i in self._ocr_jobs or not self.pdf_path or not self.tessdata:
+            return
+        self.status_var.set(f"Reading page {i + 1} with OCR...")
+        fut = self.ocr_pool.submit(self.pdf_path, i, self.tessdata)
+        self._ocr_jobs[i] = fut
+        source, path = self.source, self.pdf_path
+        self.after(150, lambda: self._poll_ocr(i, fut, source, path))
+
+    def _poll_ocr(self, i, fut, source, path):
+        if not fut.done():
+            self.after(150, lambda: self._poll_ocr(i, fut, source, path))
+            return
+        err = None
+        try:
+            source.store_ocr(i, fut.result())
+        except Exception as e:  # noqa: BLE001
+            log.error("OCR page %s failed: %s", i, e)
+            err = e
+        self._ocr_done(i, source, path, err)
+
+    def _ocr_done(self, i, source, path, err):
+        if source is not self.source or path != self.pdf_path:
+            return  # the PDF or the OCR setting changed meanwhile
+        self._ocr_jobs.pop(i, None)
+        if err is not None:
+            self.status_var.set(f"OCR failed on page {i + 1}: {err}")
+            if i == self.page_index:
+                self.canvas.delete("ocrmsg")
+            return
+        n = len(source.words(self.doc, i))
+        if i == self.page_index:
+            self.canvas.delete("ocrmsg")
+            self.status_var.set(f"Page {i + 1} read with OCR ({n} words, shown in teal boxes). "
+                                "Check the numbers against the PDF.")
+            if self._autodetect_after_ocr == i:
+                self._autodetect_after_ocr = None
+                self.auto_detect(quiet=True)
+            else:
+                self.draw_overlay()
+        self.schedule_preview(0)
 
     def go_page(self, step):
         if not self.doc:
@@ -362,10 +464,15 @@ class App(tk.Tk):
         self.prev_btn.configure(state="normal" if self.page_index > 0 else "disabled")
         self.next_btn.configure(state="normal" if self.page_index < self.doc.page_count - 1 else "disabled")
         self.own_area_var.set(self.page_index in self.layout.page_areas)
-        if not eng.page_has_text(page):
+        if self._ocr_mode() == "off" and not eng.page_has_text(page):
             c.create_text(self.offset[0] + pix.width / 2, self.offset[1] + 40, fill=BREAK_COLOR,
                           font=("Segoe UI", 12, "bold"), tags="overlay",
                           text="No readable text on this page (scanned image) - it will convert as empty.")
+        elif not self.source.ready(self.doc, self.page_index):
+            c.create_text(self.offset[0] + pix.width / 2, self.offset[1] + 40, fill=OCR_BOX,
+                          font=("Segoe UI", 12, "bold"), tags=("overlay", "ocrmsg"),
+                          text="Scanned page - reading it with OCR...")
+            self._start_ocr(self.page_index)
         self.draw_overlay()
         self.schedule_preview()
 
@@ -412,6 +519,11 @@ class App(tk.Tk):
             label = "Table top" if name == "top" else "Table bottom"
             c.create_text(x0 + w - 6, y + (-8 if name == "top" and y > y0 + 14 else 9), text=label,
                           anchor="e", fill=AREA_COLOR, font=("Segoe UI", 8, "bold"), tags="overlay2")
+        # words found by OCR, so the bars can be placed against them
+        if self.source.uses_ocr(self.doc, self.page_index) and self.source.ready(self.doc, self.page_index):
+            for wd in self.source.words(self.doc, self.page_index):
+                c.create_rectangle(self.px(wd.x0), self.py(wd.y0), self.px(wd.x1), self.py(wd.y1),
+                                   outline=OCR_BOX, width=1, tags="overlay2")
         # column breaks
         bs = sorted(self.layout.breaks)
         for i, b in enumerate(bs):
@@ -586,7 +698,12 @@ class App(tk.Tk):
         if self.layout.breaks and not quiet:
             if not messagebox.askyesno(APP_TITLE, "Replace the current breaks with suggested ones for this page?"):
                 return
-        bs = eng.auto_detect_breaks(self.words(self.page_index), self._page_area())
+        words = self.words(self.page_index)
+        if words is None:
+            self._autodetect_after_ocr = self.page_index
+            self.status_var.set("Breaks will be suggested once OCR has read this page...")
+            return
+        bs = eng.auto_detect_breaks(words, self._page_area())
         self.layout.breaks = bs
         self.selected = None
         self.draw_overlay()
@@ -694,12 +811,25 @@ class App(tk.Tk):
             return
         hidden = 0
         n_head = 0
+        words = self.words(self.page_index)
+        if words is None:
+            self.tree.delete(*self.tree.get_children())
+            self.preview_note.configure(text="Reading this page with OCR... the preview appears in a few seconds.")
+            return
         try:
-            rows = eng.page_rows(self.doc[self.page_index], self.layout, self.page_index)
+            rows = eng.page_rows(self.doc[self.page_index], self.layout, self.page_index, words)
             if self.layout.options.skip_repeated_header and rows:
                 pages = self._range_pages()
-                first = next((i for i in pages if eng.page_rows(self.doc[i], self.layout, i)), None)
-                headings = eng.find_headings(self.doc, self.layout, pages)
+                first, headings = None, []
+                count = max(1, int(self.layout.options.heading_rows or 1))
+                for i in pages:
+                    w = words if i == self.page_index else self.words(i)
+                    if w is None:
+                        break   # that page is still being OCR'd; headings are checked afterwards
+                    r = eng.page_rows(self.doc[i], self.layout, i, w)
+                    if r:
+                        first, headings = i, [list(x) for x in r[:count]]
+                        break
                 if self.page_index == first:
                     n_head = len(headings)
                 elif headings and self.page_index in pages and (first is None or self.page_index > first):
@@ -743,6 +873,10 @@ class App(tk.Tk):
     # Convert
     # ------------------------------------------------------------------
     def convert(self):
+        if self._convert_cancel is not None:      # the button reads "Cancel conversion"
+            self._convert_cancel.set()
+            self.status_var.set("Cancelling after the current page...")
+            return
         if not self.doc:
             return
         self._options_changed()
@@ -760,43 +894,110 @@ class App(tk.Tk):
                                            initialfile=Path(self.pdf_path).stem + ".xlsx")
         if not out:
             return
-        self.convert_btn.configure(state="disabled")
         self.progress.configure(maximum=len(pages), value=0)
+        self._convert_cancel = threading.Event()
+        cancel = self._convert_cancel
+        self.convert_btn.configure(text="Cancel conversion")
+        layout = eng.Layout.from_json(self.layout.to_json())   # a copy: bars may move meanwhile
+        source, path = self.source, self.pdf_path
+        one_sheet, page_col = self.sheet_var.get() == "one", self.pagecol_var.get()
+        ocr_needed = sum(1 for i in pages if not source.ready(self.doc, i))
+        self.status_var.set(f"Converting {len(pages)} page(s)"
+                            + (f", {ocr_needed} of them by OCR (a few seconds each)..." if ocr_needed else "..."))
 
         def progress(n, total):
-            self.progress.configure(value=n)
-            self.status_var.set(f"Reading page {n} of {total}...")
-            self.update_idletasks()
+            if cancel.is_set():
+                raise _Cancelled()
+            self.after(0, lambda: (self.progress.configure(value=n),
+                                   self.status_var.set(f"Read {n} of {total} page(s)...")))
 
-        try:
-            rows = eng.extract(self.doc, self.layout, pages, progress)
-            headings = eng.find_headings(self.doc, self.layout, pages) if self.layout.options.skip_repeated_header else None
-            self.status_var.set("Writing the workbook...")
-            self.update_idletasks()
-            n = eng.write_workbook(out, rows, self.layout.options,
-                                   one_sheet=self.sheet_var.get() == "one",
-                                   page_column=self.pagecol_var.get(),
-                                   source_name=Path(self.pdf_path).name,
-                                   headings=headings)
-        except PermissionError:
+        pool, tessdata = self.ocr_pool, self.tessdata
+
+        def work():
+            result, err = None, None
+            futures = []
+            try:
+                d = eng.open_pdf(path)
+                try:
+                    # Scanned pages first, in worker processes, several at a
+                    # time (see OcrPool); then the fast part, page by page.
+                    todo = [i for i in pages if not source.ready(d, i)]
+                    if todo:
+                        futures = [(i, pool.submit(path, i, tessdata)) for i in todo]
+                        for k, (i, f) in enumerate(futures, 1):
+                            while True:
+                                if cancel.is_set():
+                                    raise _Cancelled()
+                                try:
+                                    source.store_ocr(i, f.result(timeout=0.25))
+                                    break
+                                except TimeoutError:
+                                    continue
+                            self.after(0, lambda k=k: (
+                                self.progress.configure(value=k),
+                                self.status_var.set(f"Read {k} of {len(todo)} scanned page(s) with OCR...")))
+                    rows = eng.extract(d, layout, pages, progress, source=source)
+                    headings = (eng.find_headings(d, layout, pages, source)
+                                if layout.options.skip_repeated_header else None)
+                    ocr_pages = sorted(set(pages) & source.ocr_pages)
+                    if cancel.is_set():
+                        raise _Cancelled()
+                    self.after(0, lambda: self.status_var.set("Writing the workbook..."))
+                    n = eng.write_workbook(out, rows, layout.options, one_sheet=one_sheet,
+                                           page_column=page_col, source_name=Path(path).name,
+                                           headings=headings, ocr_pages=ocr_pages)
+                    result = (rows, n, ocr_pages)
+                finally:
+                    d.close()
+            except Exception as e:  # noqa: BLE001
+                err = e
+                for _i, f in futures:
+                    f.cancel()
+                if not isinstance(e, (_Cancelled, PermissionError)):
+                    log.error("convert failed: %s\n%s", e, traceback.format_exc())
+            self.after(0, lambda: self._convert_done(out, pages, result, err))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _convert_done(self, out, pages, result, err):
+        self._convert_cancel = None
+        self.convert_btn.configure(text="Convert to Excel...", state="normal")
+        if isinstance(err, _Cancelled):
+            self.status_var.set("Conversion cancelled -- nothing was saved.")
+            self.progress.configure(value=0)
+            return
+        if isinstance(err, PermissionError):
             messagebox.showerror(APP_TITLE, f"Couldn't save to\n{out}\n\nIs it open in Excel? Close it and try again.")
             self.status_var.set("Not saved.")
             return
-        except Exception as e:
-            log.error("convert failed: %s\n%s", e, traceback.format_exc())
-            messagebox.showerror(APP_TITLE, f"The conversion failed.\n\n{e}\n\nDetails were written to\n{LOG_PATH}")
+        if err is not None:
+            messagebox.showerror(APP_TITLE, f"The conversion failed.\n\n{err}\n\nDetails were written to\n{LOG_PATH}")
             self.status_var.set("Conversion failed.")
             return
-        finally:
-            self.convert_btn.configure(state="normal")
+        rows, n, ocr_pages = result
+        if self.doc:
+            self.draw_overlay()
+            self.schedule_preview(0)
         empty = [i + 1 for i in pages if not rows.get(i)]
         msg = f"Saved {n:,} row(s) from {len(pages)} page(s) to\n{out}"
+        if ocr_pages:
+            shown = ", ".join(str(i + 1) for i in ocr_pages[:20]) + ("..." if len(ocr_pages) > 20 else "")
+            msg += (f"\n\n{len(ocr_pages)} scanned page(s) were read with OCR ({shown}). Their rows are "
+                    "tinted yellow in the workbook: OCR can misread a character (0/O, 1/l, 5/S), so "
+                    "check those numbers against the PDF.")
         if empty:
             msg += f"\n\nNo text was found in the table area on page(s): {', '.join(map(str, empty[:20]))}{'...' if len(empty) > 20 else ''}"
         msg += "\n\nCheck the totals against the PDF before relying on the conversion."
         self.status_var.set(f"Saved {out}")
         if messagebox.askyesno(APP_TITLE, msg + "\n\nOpen the workbook now?"):
             _open_file(out)
+
+    def _on_close(self):
+        if self._convert_cancel is not None:
+            self._convert_cancel.set()
+        try:
+            self.ocr_pool.shutdown()
+        finally:
+            self.destroy()
 
     # ------------------------------------------------------------------
     # Update check
@@ -834,6 +1035,7 @@ def _open_file(path):
 
 
 def main():
+    multiprocessing.freeze_support()   # OCR worker processes in the built app
     app = App()
     if len(sys.argv) > 1 and Path(sys.argv[1]).is_file():
         app.after(100, lambda: app.open_pdf(sys.argv[1]))

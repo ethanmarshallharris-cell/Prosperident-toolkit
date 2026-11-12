@@ -90,6 +90,21 @@ jobs:
       # -- it isn't committed to the repo from a fresh checkout, so
       # --add-data must only reference it when it's actually present, or
       # PyInstaller fails the whole build with "Unable to find ...".
+      # PDF to Excel reads scanned pages with the OCR engine built into
+      # PyMuPDF, which needs Tesseract's English language file. It is
+      # downloaded here (pinned to tessdata 4.1.0) and bundled into the app
+      # as its "tessdata" folder -- see pdf_table_engine.find_tessdata().
+      - name: Get OCR language data (PDF to Excel)
+        if: matrix.tool_dir == 'pdf_to_excel'
+        working-directory: ${{ matrix.tool_dir }}
+        run: |
+          mkdir -p tessdata
+          curl -fsSL --retry 3 -o tessdata/eng.traineddata "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata" \
+            || curl -fsSL --retry 3 -o tessdata/eng.traineddata "https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata"
+          size=$(wc -c < tessdata/eng.traineddata)
+          echo "eng.traineddata: $size bytes"
+          test "$size" -gt 1000000
+
       - name: Build with PyInstaller (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ matrix.tool_dir }}
@@ -107,6 +122,7 @@ jobs:
           elif [ "${{ matrix.tool_dir }}" = "pdf_to_excel" ]; then
             python -m PyInstaller --onefile --windowed --name "${{ matrix.app_name }}" \
               --add-data "prosperident_logo.png;." \
+              --add-data "tessdata;tessdata" \
               "${{ matrix.entry }}"
           else
             python -m PyInstaller --onefile --windowed --name "${{ matrix.app_name }}" \
@@ -131,6 +147,7 @@ jobs:
           elif [ "${{ matrix.tool_dir }}" = "pdf_to_excel" ]; then
             python -m PyInstaller --windowed --name "${{ matrix.app_name }}" \
               --add-data "prosperident_logo.png:." \
+              --add-data "tessdata:tessdata" \
               "${{ matrix.entry }}"
           else
             python -m PyInstaller --windowed --name "${{ matrix.app_name }}" \

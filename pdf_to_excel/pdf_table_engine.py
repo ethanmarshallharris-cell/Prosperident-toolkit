@@ -5,9 +5,27 @@ pdf_to_excel_app.py for the window).
 Turns the text of a PDF -- a bank statement, a practice-management report,
 any page laid out in columns -- into rows and columns for Excel, using
 column breaks the user places by hand (or that auto_detect_breaks()
-suggests). Works on PDFs that contain real text. A scanned page is only a
-picture of text and has none; page_has_text() says so and the window
-tells the user (no OCR here).
+suggests). Pages with real text are read directly; a SCANNED page (a
+picture of text, with none to read) is read with OCR -- see "SCANNED PAGES
+(OCR)" below.
+
+SCANNED PAGES (OCR) (added November 2026)
+  PyMuPDF has the Tesseract OCR engine built in; it needs only Tesseract's
+  English language file, eng.traineddata, which the built app carries in
+  its "tessdata" folder (see find_tessdata()). WordSource decides where
+  each page's words come from:
+    ocr_mode "auto" -- the PDF's own text; OCR only for a page with none
+                       (the default);
+             "all"  -- OCR every page, ignoring any text already in the PDF
+                       (for a scan whose built-in text layer is poor);
+             "off"  -- never OCR (a scanned page converts as empty).
+  OCR renders the page at 300 dpi and reads it -- about 1 to 3 seconds a
+  page -- so results are cached per page. OCR'd words carry positions just
+  like real text, so the same bars, table area and options apply. Stray
+  marks read as lone punctuation ("_", "|", "—") are dropped. OCR can
+  misread a character (0/O, 1/l, 5/S), so rows from OCR'd pages are tinted
+  in the workbook and listed on its About sheet: check them against the
+  PDF.
 
 HOW A PAGE BECOMES ROWS
   1. Words come from PyMuPDF with their positions (page_words()), already
@@ -56,9 +74,13 @@ LAYOUTS
   layout is independent of screen size and zoom.
 """
 import json
+import os
 import re
 import statistics
+import sys
+import threading
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
@@ -182,6 +204,164 @@ def page_has_text(page) -> bool:
     return bool(page.get_text("words"))
 
 
+# --------------------------------------------------------------------------
+# OCR for scanned pages
+# --------------------------------------------------------------------------
+OCR_DPI = 300
+OCR_LANGUAGE = "eng"
+_OCR_JUNK_RE = re.compile(r"^[_\-\u2014\u2013|~`'\".,:;!\u2018\u2019\u201c\u201d=*^]+$")
+
+
+def find_tessdata():
+    """The folder holding eng.traineddata, or None. Looks in the app's own
+    "tessdata" folder (bundled with the built app, or next to the script),
+    then TESSDATA_PREFIX, then where a Tesseract install usually puts it."""
+    here = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    candidates = [here / "tessdata", Path(sys.executable).resolve().parent / "tessdata"]
+    if os.environ.get("TESSDATA_PREFIX"):
+        p = Path(os.environ["TESSDATA_PREFIX"])
+        candidates += [p, p / "tessdata"]
+    candidates += [
+        Path(r"C:\Program Files\Tesseract-OCR\tessdata"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tessdata"),
+        Path("/opt/homebrew/share/tessdata"), Path("/usr/local/share/tessdata"),
+        Path("/usr/share/tessdata"),
+    ]
+    candidates += sorted(Path("/usr/share/tesseract-ocr").glob("*/tessdata")) if Path("/usr/share/tesseract-ocr").exists() else []
+    for c in candidates:
+        try:
+            if (c / f"{OCR_LANGUAGE}.traineddata").is_file():
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
+def ocr_page_words(page, tessdata: str, dpi: int = OCR_DPI) -> List[Word]:
+    """The words OCR reads on `page`, positioned like page_words() (the
+    page as displayed, points from its top-left corner). The page is first
+    drawn as it is displayed onto a plain, unrotated page and OCR'd there:
+    OCR straight off a page stored with a /Rotate setting can skip part of
+    it (seen with 270-degree pages), and this way every orientation reads
+    the same."""
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    tmp = fitz.open()
+    try:
+        flat = tmp.new_page(width=page.rect.width, height=page.rect.height)
+        flat.insert_image(flat.rect, pixmap=pix)
+        tp = flat.get_textpage_ocr(language=OCR_LANGUAGE, dpi=dpi, full=True, tessdata=tessdata)
+        out = []
+        for x0, y0, x1, y1, text, *_rest in flat.get_text("words", textpage=tp):
+            text = text.strip()
+            if not text or _OCR_JUNK_RE.match(text):
+                continue
+            out.append(Word(x0, y0, x1, y1, text))
+        return out
+    finally:
+        tmp.close()
+
+
+def ocr_worker(path: str, page_index: int, tessdata: str, dpi: int = OCR_DPI):
+    """OCR one page in a WORKER PROCESS (see OcrPool) -- plain tuples, so
+    the result can be sent back. PyMuPDF keeps Python's global lock while
+    OCR runs, so OCR in a thread would freeze the window; a separate
+    process doesn't, and several can read different pages at once."""
+    doc = open_pdf(path)
+    try:
+        return [(w.x0, w.y0, w.x1, w.y1, w.text) for w in ocr_page_words(doc[page_index], tessdata, dpi)]
+    finally:
+        doc.close()
+
+
+class OcrPool:
+    """Worker processes for OCR (started on first use; a frozen app must
+    call multiprocessing.freeze_support() first thing in main())."""
+
+    def __init__(self, workers: int = None):
+        cpus = os.cpu_count() or 2
+        self.workers = workers or max(1, min(4, cpus - 1))
+        self._pool = None
+
+    def submit(self, path, page_index, tessdata):
+        if self._pool is None:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(max_workers=self.workers,
+                                             mp_context=multiprocessing.get_context("spawn"))
+        return self._pool.submit(ocr_worker, path, page_index, tessdata)
+
+    def shutdown(self):
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+
+class OcrUnavailable(RuntimeError):
+    pass
+
+
+class WordSource:
+    """Where each page's words come from -- the PDF's own text or OCR (see
+    "SCANNED PAGES (OCR)") -- with a cache shared by every thread that uses
+    it. Each thread passes its OWN open document (PyMuPDF documents must
+    not be used by two threads at once)."""
+
+    def __init__(self, ocr_mode: str = "auto", tessdata: Optional[str] = None):
+        self.ocr_mode = ocr_mode
+        self.tessdata = tessdata
+        self._cache: Dict[tuple, List[Word]] = {}
+        self._has_text: Dict[int, bool] = {}
+        self._lock = threading.Lock()
+        self.ocr_pages = set()      # pages whose words came from OCR
+
+    def uses_ocr(self, doc, i: int) -> bool:
+        if self.ocr_mode == "off":
+            return False
+        if self.ocr_mode == "all":
+            return True
+        with self._lock:
+            known = self._has_text.get(i)
+        if known is None:
+            known = page_has_text(doc[i])
+            with self._lock:
+                self._has_text[i] = known
+        return not known
+
+    def ready(self, doc, i: int) -> bool:
+        """True when words(doc, i) will not need to run OCR."""
+        if not self.uses_ocr(doc, i):
+            return True
+        with self._lock:
+            return (i, "ocr") in self._cache
+
+    def store_ocr(self, i: int, tuples) -> None:
+        """Keeps OCR results computed elsewhere (an OcrPool worker)."""
+        with self._lock:
+            self._cache[(i, "ocr")] = [Word(*t) for t in tuples]
+            self.ocr_pages.add(i)
+
+    def words(self, doc, i: int) -> List[Word]:
+        if not self.uses_ocr(doc, i):
+            key = (i, "text")
+        else:
+            key = (i, "ocr")
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        if key[1] == "text":
+            result = page_words(doc[i])
+        else:
+            if not self.tessdata:
+                raise OcrUnavailable("OCR isn't available: the tessdata folder with eng.traineddata wasn't found.")
+            result = ocr_page_words(doc[i], self.tessdata)
+        with self._lock:
+            self._cache[key] = result
+            if key[1] == "ocr":
+                self.ocr_pages.add(i)
+        return result
+
+
 def page_size(page):
     """(width, height) as displayed (page.rect already has the page's
     rotation applied; the words need page.rotation_matrix, see above)."""
@@ -218,11 +398,12 @@ def split_line(line: List[Word], breaks: List[float]) -> List[str]:
     return [" ".join(c) for c in cells]
 
 
-def page_rows(page, layout: Layout, page_index: int) -> List[List[str]]:
+def page_rows(page, layout: Layout, page_index: int, words: List[Word] = None) -> List[List[str]]:
     """The rows of one page with the layout applied (before cross-page
-    options such as skipping repeated headers)."""
+    options such as skipping repeated headers). `words` -- from a
+    WordSource -- or None for the page's own text."""
     area = layout.area_for(page_index)
-    words = [w for w in page_words(page) if area.contains(w)]
+    words = [w for w in (page_words(page) if words is None else words) if area.contains(w)]
     rows = [split_line(line, layout.breaks) for line in group_lines(words)]
     if layout.options.join_wrapped:
         rows = join_wrapped_rows(rows)
@@ -246,12 +427,12 @@ def _heading_key(row):
     return tuple(re.sub(r"\d+", "#", re.sub(r"\s+", " ", c.strip().lower())) for c in row)
 
 
-def find_headings(doc, layout: Layout, pages: List[int]) -> List[List[str]]:
+def find_headings(doc, layout: Layout, pages: List[int], source: "WordSource" = None) -> List[List[str]]:
     """The heading rows: the first `heading_rows` rows of the first page in
     `pages` that has any text in its table area. [] if none."""
     count = max(1, int(layout.options.heading_rows or 1))
     for i in pages:
-        rows = page_rows(doc[i], layout, i)
+        rows = page_rows(doc[i], layout, i, source.words(doc, i) if source else None)
         if rows:
             return [list(r) for r in rows[:count]]
     return []
@@ -263,12 +444,15 @@ def strip_headings(rows: List[List[str]], headings: List[List[str]]) -> List[Lis
     return [r for r in rows if _heading_key(r) not in keys]
 
 
-def extract(doc, layout: Layout, pages: List[int], progress=None) -> Dict[int, List[List[str]]]:
-    """{page_index: rows} for the given pages, with every option applied."""
+def extract(doc, layout: Layout, pages: List[int], progress=None,
+            source: "WordSource" = None) -> Dict[int, List[List[str]]]:
+    """{page_index: rows} for the given pages, with every option applied.
+    `source` decides text vs OCR per page (None: the PDF's own text).
+    `progress(done, total)` may raise to stop the run."""
     result = {}
     headings = None
     for n, i in enumerate(pages, 1):
-        rows = page_rows(doc[i], layout, i)
+        rows = page_rows(doc[i], layout, i, source.words(doc, i) if source else None)
         if layout.options.skip_repeated_header:
             if headings is None:
                 if rows:
@@ -366,15 +550,19 @@ def to_number(text: str):
 # --------------------------------------------------------------------------
 def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options: Options,
                    one_sheet: bool = True, page_column: bool = True, source_name: str = "",
-                   headings: List[List[str]] = None):
+                   headings: List[List[str]] = None, ocr_pages=None):
     """Saves the extraction as .xlsx. One sheet with every page (optionally
     a "Page" column first) or one sheet per page. `headings` (from
     find_headings, when headings are shown once): on one sheet their Page
     cell reads "Page"; with one sheet per page, each sheet starts with
-    them. Returns the number of rows written."""
+    them. Rows from `ocr_pages` (read by OCR) are tinted light yellow so
+    they can be checked against the PDF. Returns the number of rows
+    written."""
+    ocr_pages = set(ocr_pages or ())
     keys = {_heading_key(h) for h in (headings or [])}
     import openpyxl
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, PatternFill
+    ocr_fill = PatternFill("solid", fgColor="FFF4C2")
     from openpyxl.utils import get_column_letter
 
     wb = openpyxl.Workbook()
@@ -382,7 +570,7 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
     ws.title = "Converted"
     total = 0
 
-    def put(sheet, values, page_no=None):
+    def put(sheet, values, page_no=None, tint=False):
         row = []
         if page_no is not None:
             row.append(page_no)
@@ -390,6 +578,9 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
             n = to_number(v) if options.convert_numbers else None
             row.append(n if n is not None else v)
         sheet.append(row)
+        if tint:
+            for c in sheet[sheet.max_row]:
+                c.fill = ocr_fill
 
     sheets = []
     if one_sheet:
@@ -399,9 +590,9 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
                     if keys and _heading_key(r) in keys:
                         ws.append(["Page"] + [v for v in r])
                     else:
-                        put(ws, r, i + 1)
+                        put(ws, r, i + 1, tint=i in ocr_pages)
                 else:
-                    put(ws, r)
+                    put(ws, r, tint=i in ocr_pages)
                 total += 1
         sheets.append(ws)
     else:
@@ -413,7 +604,7 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
                 for h in headings:
                     s.append(list(h))
             for r in page_rows_:
-                put(s, r)
+                put(s, r, tint=i in ocr_pages)
                 total += 1
             sheets.append(s)
         if not sheets:
@@ -435,6 +626,10 @@ def write_workbook(path: str, rows_by_page: Dict[int, List[List[str]]], options:
     info = wb.create_sheet("About")
     info.append(["Converted from", source_name])
     info.append(["Pages", ", ".join(str(i + 1) for i in sorted(rows_by_page))])
+    if ocr_pages:
+        info.append(["Read by OCR (scanned)", ", ".join(str(i + 1) for i in sorted(ocr_pages))])
+        info.append(["", "Rows from these pages are tinted yellow. OCR can misread a character "
+                         "(0/O, 1/l, 5/S) -- check them against the PDF."])
     info.append(["Note", "Check totals against the PDF before relying on this conversion."])
     wb.save(path)
     return total

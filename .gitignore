@@ -14,3 +14,5 @@ UpdateNoticeShown.txt
 logs/
 # The exporter's case list names clients - never commit it (the repo is public)
 casecapture-config.json
+# PDF to Excel's OCR language file is downloaded when building/running, not committed
+pdf_to_excel/tessdata/

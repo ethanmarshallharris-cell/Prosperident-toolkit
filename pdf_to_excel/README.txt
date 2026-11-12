@@ -73,14 +73,36 @@ LAYOUTS
 "Load layout..." to reuse them. Breaks you have already placed are also
 kept when you open another PDF in the same session.
 
+SCANNED PDFs (OCR)
+------------------
+A scanned page is only a picture of text. PDF to Excel reads it with OCR
+(optical character recognition) automatically -- nothing else to install:
+  * Open the scanned PDF as usual. The page shows "reading it with OCR..."
+    for a few seconds, then thin teal boxes appear around every word OCR
+    found, and column breaks are suggested. Place the bars against the
+    boxes exactly as for any other PDF.
+  * "Scanned pages" (under Options):
+      Read scanned pages with OCR -- the default: pages that already have
+        real text are read directly, only picture-only pages use OCR.
+      OCR every page -- for a scan whose built-in text is poor (garbled
+        when copied out of the PDF): re-reads every page with OCR.
+      Off -- scanned pages convert as empty.
+  * OCR takes about 1-3 seconds a page; several pages are read at once,
+    and the window stays usable. A long conversion can be cancelled (the
+    Convert button becomes "Cancel conversion").
+  * OCR can misread a character (0/O, 1/l, 5/S), especially on a faint or
+    crooked scan. Rows from OCR'd pages are tinted YELLOW in the workbook
+    and listed on its About sheet -- check them, and the totals, against
+    the PDF.
+  * Best results: scans at 300 dpi, straight and clear. A page scanned
+    sideways or upside down must be rotated in a PDF viewer first.
+
 LIMITS
 ------
-* The PDF must contain real text. A scanned PDF is a picture of text; the
-  program says so when it opens one. Run it through OCR first (for
-  example Adobe Acrobat's Scan & OCR), then open the OCR'd copy.
 * Password-protected PDFs: save an unprotected copy first.
 * Always reconcile totals to the PDF before relying on the conversion.
   The workbook's "About" sheet records the source file and pages.
+* Handwriting is not read.
 
 Errors are logged to:
   Windows: %LOCALAPPDATA%\Prosperident\PDFtoExcel\pdf_to_excel.log
@@ -91,6 +113,7 @@ FILES
 pdf_to_excel_app.py   the window
 pdf_table_engine.py   the conversion (rows, columns, numbers, Excel)
 branding.py, update_check.py, prosperident_logo.png   shared suite files
-PDF to Excel.bat      run from source (needs Python)
+PDF to Excel.bat      run from source (needs Python; downloads the OCR
+                      language file into tessdata\ the first time)
 build_windows.bat / build_mac.sh   build the standalone app by hand
 Version: APP_VERSION in pdf_to_excel_app.py (Ship-Update sets it).

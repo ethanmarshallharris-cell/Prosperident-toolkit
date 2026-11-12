@@ -9,9 +9,15 @@ echo Installing build dependencies...
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :error
+if not exist "tessdata\eng.traineddata" (
+    echo Downloading the OCR language file ^(about 23 MB, one time only^)...
+    if not exist tessdata mkdir tessdata
+    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata' -OutFile 'tessdata\eng.traineddata'"
+)
+if not exist "tessdata\eng.traineddata" goto :error
 echo.
 echo Building PDFtoExcel.exe ...
-python -m PyInstaller --onefile --windowed --name PDFtoExcel --distpath dist --workpath build --add-data "prosperident_logo.png;." pdf_to_excel_app.py
+python -m PyInstaller --onefile --windowed --name PDFtoExcel --distpath dist --workpath build --add-data "prosperident_logo.png;." --add-data "tessdata;tessdata" pdf_to_excel_app.py
 if errorlevel 1 goto :error
 echo.
 echo ============================================================
