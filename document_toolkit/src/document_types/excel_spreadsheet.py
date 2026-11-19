@@ -88,8 +88,10 @@ problem that motivated the whole-page-rebuild strategy used elsewhere.
 --------------------------------------------------------------------------
 KNOWN LIMITATIONS
 --------------------------------------------------------------------------
-- Modern Excel (.xlsx) workbooks and .csv files are supported -- not the
-  legacy .xls binary format. A .csv (added October 2026) is read through
+- Modern Excel (.xlsx) workbooks, older .xls files (read through
+  legacy_xls.py -- genuine Excel 97-2003 workbooks and the web-page, XML
+  and text exports that systems name .xls; the redacted copy is saved as
+  .xlsx) and .csv files are supported. A .csv (added October 2026) is read through
   csv_table.py as a one-sheet workbook (sheet name "CSV"), so everything
   above -- choosing and combining columns, numbering, keys, one-stop keys,
   verification, batch redaction -- works on it unchanged. Every CSV value
@@ -129,13 +131,14 @@ from openpyxl.utils import get_column_letter
 
 from . import _key_lineage
 import csv_table
+import legacy_xls
 
 ID = "excel_spreadsheet"
 DISPLAY_NAME = "Excel or CSV Spreadsheet (choose columns)"
 FORMAT_KIND = "spreadsheet"
 FILE_TYPES = [
-    ("Excel or CSV files", "*.xlsx *.csv"),
-    ("Excel files", "*.xlsx"),
+    ("Excel or CSV files", "*.xlsx *.xls *.csv"),
+    ("Excel files", "*.xlsx *.xls"),
     ("CSV files", "*.csv"),
     ("All files", "*.*"),
 ]
@@ -455,6 +458,10 @@ def _open_workbook(path: str, **kwargs):
     """
     if csv_table.is_csv(path):
         return csv_table.load_as_workbook(path)
+    if legacy_xls.is_xls(path):
+        # Excel 97-2003 or an export named .xls -- see legacy_xls.py. The
+        # redacted copy is saved as .xlsx.
+        return legacy_xls.load_as_workbook(path)
     try:
         return openpyxl.load_workbook(path, **kwargs)
     except Exception as exc:

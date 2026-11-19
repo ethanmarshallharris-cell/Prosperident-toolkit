@@ -70,7 +70,7 @@ APP_TITLE = "Prosperident Document Redactor"
 # confirm at a glance -- e.g. "is this machine actually running the
 # version with the per-page progress display, or an older build?" Shown
 # in the window title bar so that question never requires guessing.
-APP_BUILD = "2026-10-29.1"
+APP_BUILD = "2026-11-19"
 PREVIEW_PAD_X = 40   # extra horizontal context (points) around a previewed line
 PREVIEW_PAD_Y = 3    # extra vertical context (points)
 PREVIEW_ZOOM = 3.0
@@ -417,6 +417,13 @@ FAILURE_TROUBLESHOOTING = (
     "PDF viewer, File Explorer preview pane, antivirus scan)\n"
     "  - Check that the drive isn't full"
 )
+
+
+def _redacted_ext(path):
+    """The redacted copy's extension: a .xls is saved as .xlsx (see
+    legacy_xls.py); everything else keeps its own."""
+    ext = os.path.splitext(path)[1]
+    return ".xlsx" if ext.lower() == ".xls" else ext
 
 
 def _full_name_summary_text(summary, limit=8):
@@ -3922,7 +3929,7 @@ class DocumentRedactorApp(tk.Tk):
         dupes = set()
         for f in self.batch_files:
             p = f["path"]
-            out_name = f"{os.path.splitext(os.path.basename(p))[0]}_REDACTED{os.path.splitext(p)[1]}"
+            out_name = f"{os.path.splitext(os.path.basename(p))[0]}_REDACTED{_redacted_ext(p)}"
             if out_name in planned_names and planned_names[out_name] != p:
                 dupes.add(out_name)
             planned_names[out_name] = p
@@ -4025,7 +4032,7 @@ class DocumentRedactorApp(tk.Tk):
                 is_spreadsheet = self._is_spreadsheet_type(dt)
                 name = os.path.basename(input_path)
                 base, ext = os.path.splitext(name)
-                output_path = os.path.join(output_dir, f"{base}_REDACTED{ext}")
+                output_path = os.path.join(output_dir, f"{base}_REDACTED{_redacted_ext(input_path)}")
                 self.after(
                     0,
                     lambda i=i, total=len(files), name=name: self.batch_summary_var.set(

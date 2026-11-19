@@ -10,7 +10,7 @@ itself. Two document types exist today:
 - **Dentrix Audit Trail Report** -- scans a PDF for patient names inside
   audit trail entries and redacts them.
 - **Excel or CSV Spreadsheet (choose columns)** -- lets you pick which
-  column(s) of an .xlsx workbook or a .csv file to redact, rather than
+  column(s) of an .xlsx or .xls workbook or a .csv file to redact, rather than
   auto-detecting matches (see below -- this one works differently from the
   PDF type, by design).
 
@@ -41,6 +41,20 @@ file ("Smith, John" and "SMITH, JOHN") both get the same number, but
 un-redaction restores the first spelling; those are listed too. Batch
 Redact supports the same thing when the First/Last file and the full-name
 file are in one batch.
+
+## .xls files (added November 2026)
+
+Older Excel files (.xls) can be redacted like .xlsx workbooks: Browse
+accepts them, and Load Columns, combining, full-name columns, keys and
+Batch Redact all work the same. The redacted copy is always saved as
+**.xlsx** (`..._REDACTED.xlsx`) -- nothing reliable writes the old .xls
+format any more, and Excel opens the .xlsx the same way; un-redact that
+.xlsx with the key as usual. Many systems that "export to Excel" really
+write a web page, an XML spreadsheet or a tab-delimited text file named
+.xls; the app tells these apart by their contents and reads each (see
+`src/legacy_xls.py`). Only values are carried over, not formatting
+(fonts, colors, column widths). A password-protected .xls must have its
+password removed in Excel first.
 
 ## CSV files (added October 2026)
 
